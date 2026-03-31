@@ -25,7 +25,7 @@ Projenin merkezinde yer alan `TR2Level.cs` sınıfı, standart TR2 spesifikasyon
 
 `TR2Level` sınıfı, bir `.TR2` dosyasını parametre olarak alır ve `BinaryReader` kullanarak tüm ikili yapıyı belleğe yükler. Değişken uzunluklu geometri verileri (Geometry Word List) işaretçiler (pointer) aracılığıyla taranarak kullanılabilir listelere dönüştürülür.
 
-📜 Lisans
+## 📜 Lisans
 Bu proje eğitim ve araştırma amaçlı geliştirilmiştir. Tomb Raider ve ilgili tüm materyallerin hakları ilgili sahiplerine aittir.
 
 **Örnek Kullanım:**
