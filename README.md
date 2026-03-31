@@ -32,4 +32,7 @@ Projenin merkezinde yer alan `TR2Level.cs` sınıfı, standart TR2 spesifikasyon
  {
      string filePath = "levels/wall.TR2";
      ...
-}
+ }
+
+📜 Lisans
+Bu proje eğitim ve araştırma amaçlı geliştirilmiştir. Tomb Raider ve ilgili tüm materyallerin hakları ilgili sahiplerine aittir.
