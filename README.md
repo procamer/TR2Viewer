@@ -28,5 +28,8 @@ Projenin merkezinde yer alan `TR2Level.cs` sınıfı, standart TR2 spesifikasyon
 **Örnek Kullanım:**
 ```csharp
 // Bölüm dosyasını yükle ve ayrıştır
-string levelPath = "WALL.TR2";
-TR2Level levelData = new TR2Level(levelPath);
+ static void Main()
+ {
+     string filePath = "levels/wall.TR2";
+     ...
+}
