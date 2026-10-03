@@ -197,6 +197,38 @@ namespace TR2Viewer.Render
             return roomIndex;
         }
 
+        // Tırmanılabilir duvarlar (FloorData fonksiyon 6): başlığın 8-11. bitleri bu sektörün hangi tarafındaki duvarın
+        // tırmanılabilir olduğunu söyler: 1 = +Z, 2 = +X, 4 = -Z, 8 = -X. Fonksiyon 6'nın ek veri kelimesi yoktur.
+        public int GetClimbFlags(int roomIndex, float glX, float glZ)
+        {
+            if (!TryGetSector(roomIndex, glX, glZ, out var sector) || sector.FDIndex == 0) return 0;
+            var fd = level.FloorData;
+            int idx = sector.FDIndex;
+            while (idx < fd.Length)
+            {
+                ushort header = fd[idx++];
+                int function = header & 0x1F;
+                if (function == 6) return (header >> 8) & 0x0F;
+
+                if (function is 1 or 2 or 3) idx++;
+                else if (function == 4)
+                {
+                    idx++;
+                    while (idx < fd.Length)
+                    {
+                        ushort action = fd[idx++];
+                        if (((action & 0x7C00) >> 10) == 1)
+                        {
+                            if (idx >= fd.Length || (fd[idx++] & 0x8000) != 0) break;
+                        }
+                        else if ((action & 0x8000) != 0) break;
+                    }
+                }
+                if ((header & 0x8000) != 0) break;
+            }
+            return 0;
+        }
+
         // Portal (fonksiyon 1) varsa hedef odayı döndürür, yoksa -1
         public int GetPortalRoom(ushort fdIndex) => TryGetFloorDataWord(fdIndex, 1, out ushort room) ? room : -1;
 

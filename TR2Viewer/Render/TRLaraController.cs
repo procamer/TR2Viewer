@@ -132,6 +132,11 @@ namespace TR2Viewer.Render
                 TickBoat(input); // Teknede oturma: TRLaraController.Boat.cs
                 return;
             }
+            if (_climbing)
+            {
+                TickClimb(input); // Tırmanılabilir duvar: TRLaraController.Climb.cs
+                return;
+            }
             if (_water != WaterMode.Above)
             {
                 TickWater(input); // Yüzme: TRLaraController.Swim.cs
@@ -166,6 +171,9 @@ namespace TR2Viewer.Render
                 _landed = false;
                 _groundedInAirState = 0;
             }
+
+            // Kenarda asılıyken merdivene geçildi
+            if (_hanging && CurrentAnim.StateID == StateClimbStance) StartClimbing();
 
             // Asılı kalma; yukarı çekilme bitip ayağa kalkınca sona erer
             if (_hanging && CurrentAnim.StateID is not (StateHang or StatePullUp or StateHangLeft or StateHangRight or StateReach or StateUpJump))
@@ -235,6 +243,7 @@ namespace TR2Viewer.Render
                         return StateUpJump;
                     }
                     if (state == StateHang && input.Forward && CanPullUp()) return StatePullUp;
+                    if (state == StateHang && input.Back && IsClimbableFacing(Position.X, Position.Z, Angle)) return StateClimbStance; // Merdivene in
                     if (input.Left) return StateHangLeft;
                     if (input.Right) return StateHangRight;
                     return StateHang;
@@ -266,6 +275,12 @@ namespace TR2Viewer.Render
                 case StateTurnRight:
                     if (state != StateStop) turn = turnDir * SlowTurn;
                     if (input.Action && TryClimb()) return CurrentAnim.StateID;
+                    if (input.Action && input.Forward && TryGetClimbWall(out _, out _))
+                    {
+                        // Tırmanılabilir duvar: yukarı zıpla, havada Ctrl ile duvara tutunulur
+                        SetAnimation(UpJumpStartAnimation, _level.Animations[UpJumpStartAnimation].FrameStart);
+                        return CurrentAnim.StateID;
+                    }
                     if (input.Jump) return StateCompress;
                     if (input.Forward && !IsBlockedAhead()) return input.Walk ? StateWalk : StateRun;
                     if (input.Back) return input.Walk ? StateBack : StateFastBack;
@@ -683,6 +698,7 @@ namespace TR2Viewer.Render
 
                 // Ctrl basılıyken uzanma veya yukarı zıplama sırasında aşağı inerken kenara tutun
                 if (_input.Action && _fallSpeed > 0f && CurrentAnim.StateID is (StateReach or StateUpJump) && TryCatchEdge(prevY)) return;
+                if (_input.Action && _fallSpeed > 0f && CurrentAnim.StateID is (StateReach or StateUpJump) && TryCatchClimbWall()) return;
 
                 // Suya düştüyse dal (ayaklar su yüzeyinin altına indi)
                 Room = _collision.ResolveVertical(Room, glX, -Position.Y / 1024f, glZ);

@@ -23,7 +23,7 @@ Görüntüleyici (`TRViewer.cs`) odaları ve statik objeleri çizer; varlıklar 
 * Yapay zekâ verileri (Boxes, Overlaps, Zones) ve hareketli dokular atlanır.
 * Varlıklardan sonraki bölüm (lightmap, sinematik kareler, demo verisi, ses haritası ve örnekleri) okunmaz.
 * Varlıklardan sadece tekne katıdır (üstüne düşen Lara oturur); köprü, platform gibi diğer nesnelerin çarpışması yoktur. Tekne sürülemez.
-* Lara tırmanılabilir duvarlara ve maymun barlarına tutunamaz; sığ suda yürüme (wade) animasyonu yok; nefes/hasar sistemi yok; su altı renk efekti yok.
+* Lara maymun barlarına tutunamaz; sığ suda yürüme (wade) animasyonu yok; nefes/hasar sistemi yok; su altı renk efekti yok.
 * Diğer varlıkların animasyonları yerinde oynar: hareket (Speed/Accel), animasyon komutları (ses, efekt) ve durum değişiklikleri uygulanmaz.
 * Zemin eğimleri ve tetikleyiciler yorumlanmaz.
 
@@ -68,6 +68,7 @@ window.Run();
 | A / D, ← / → | Lara döner (Shift ile yana adım atar) |
 | Space | Zıpla (yerinde: yukarı; W/S/A/D ile birlikte: ileri/geri/yana; koşarken: koşarak zıplama) |
 | Ctrl | Duvar önünde: 2-3 click yükseğe tırman. Zıplarken basılı tut: kenara tutun. Asılıyken: W yukarı çekil, A/D kenar boyunca kay, Ctrl'yi bırak düş |
+| Merdivende (tırmanılabilir duvar) | Önünde dururken Ctrl+W: zıplayıp tutun. Ctrl basılıyken W/S yukarı/aşağı, A/D yana tırman; tepede W ile kenarın üstüne çık, Space ile sırtüstü atla, Ctrl'yi bırak düş. Kenarda asılıyken S: merdivene in |
 | Su altında | W/S burun aşağı/yukarı, A/D dön, Space kulaç at |
 | Teknede | Space + A/D: sola/sağa atlayarak in (tekneye düşünce veya bölüme teknede başlayınca Lara oturur) |
 | Su yüzünde | W/S ileri/geri yüz, A/D dön, Shift+A/D yana yüz, Space'i basılı tut: dal, Ctrl: kenardan sudan çık |
