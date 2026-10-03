@@ -3,13 +3,28 @@ using OpenTK.Mathematics;
 using OpenTK.Windowing.Common;
 using OpenTK.Windowing.Desktop;
 using OpenTK.Windowing.GraphicsLibraryFramework;
+using System.Runtime.Versioning;
 using TR2Viewer.Models;
 
 namespace TR2Viewer.Render
 {
-    public class TRViewer(int width, int height, string title, TR2Level level) : 
-        GameWindow(GameWindowSettings.Default, new NativeWindowSettings() { ClientSize = (width, height), Title = title, NumberOfSamples = 8 })
+    [SupportedOSPlatform("windows")]
+    public class TRViewer(int width, int height, string? dataDirectory, string? startLevelPath) :
+        GameWindow(GameWindowSettings.Default, new NativeWindowSettings() { ClientSize = (width, height), Title = "Tomb Raider 2", NumberOfSamples = 8, WindowState = WindowState.Maximized })
     {
+        // Yüklü bölüm ve ona bağlı yardımcılar; bölüm değişince LoadLevel ile yeniden kurulur
+        private TR2Level level = null!;
+        private bool _levelLoaded;
+        private string? _currentLevelPath;
+        private TRAnimator _animator = null!;
+        private TRCollision _collision = null!;
+
+        // Bölüm seçme menüsü (Esc) ve ekran üstü arayüz
+        private TRUiRenderer _ui = null!;
+        private readonly TRLevelMenu _menu = new(dataDirectory);
+        private string? _pendingLoad;       // Menüden seçilen bölüm: önce "Yükleniyor" ekranı çizilir, sonra yüklenir
+        private bool _loadingShown;
+
         private int _vao;
         private int _vbo;
         private int _vertexCount;          // Odalar + statik objeler (tamponun başında)
@@ -32,19 +47,23 @@ namespace TR2Viewer.Render
         private readonly HashSet<int> _alternateRooms = [];
 
         // Animasyon
-        private readonly TRAnimator _animator = new(level);
         private readonly List<TRAnimatedEntity> _entities = [];
         private bool _animationsPaused = false;
         private bool _pKeyPressed = false;
 
         // Lara ve takip kamerası
-        private readonly TRCollision _collision = new(level);
         private TRLaraController? _lara;
+        private readonly List<TRSolidBox> _solids = []; // Üstünde durulabilen varlıklar
+
+        // Katı kabul edilen varlık tipleri. Düşmanlar ve eşyalar katı değildir; şimdilik veride doğrulanan tekne.
+        private static readonly HashSet<short> SolidEntityTypes = [14]; // 14 = tekne (VENICE başlangıcı)
         private bool _freeCamera = false;   // N: serbest uçuş kamerası / Lara'yı takip eden kamera
         private bool _nKeyPressed = false;
         private float _orbitYaw = 0f;       // Kameranın Lara'nın arkasından sapması (derece, fareyle)
         private float _orbitPitch = 15f;    // Kameranın yukarıdan bakış açısı (derece)
         private const float CameraDistance = 1536f / 1024f; // Oyundaki gibi ~1.5 sektör geride
+        private const float NearPlane = 0.05f;              // ~50 TR birimi: kamera duvara yaklaşınca duvarın içi görünmesin
+        private const float CameraClearance = 150f / 1024f; // Kameranın duvar/zemin/tavana en yakın mesafesi (yakın düzlemden büyük)
         private const float CameraTargetHeight = 512f / 1024f; // Bakılan nokta: Lara'nın bel hizası (tüm boyu kadraja girer)
 
         // Shader uniform konumları (shader derlendikten sonra bir kez alınır)
@@ -65,6 +84,41 @@ namespace TR2Viewer.Render
             GL.Enable(EnableCap.Multisample);
             GL.Enable(EnableCap.SampleAlphaToCoverage);
 
+            TRShader.CompileShaders();
+            int program = TRShaderHelpers._shaderProgram;
+            _viewLoc = GL.GetUniformLocation(program, "view");
+            _projLoc = GL.GetUniformLocation(program, "projection");
+            _modelLoc = GL.GetUniformLocation(program, "model");
+            _lightLoc = GL.GetUniformLocation(program, "lightScale");
+
+            _ui = new TRUiRenderer();
+            CursorState = CursorState.Grabbed;
+
+            // Komut satırından bölüm verildiyse doğrudan aç, yoksa menüyle başla
+            if (startLevelPath != null) LoadLevel(startLevelPath);
+            if (!_levelLoaded) _menu.IsOpen = true;
+        }
+
+        // Bölümü dosyadan okuyup GPU kaynaklarını, varlıkları ve kamerayı kurar. Önceki bölüm serbest bırakılır.
+        private void LoadLevel(string path)
+        {
+            TR2Level newLevel;
+            try
+            {
+                newLevel = new TR2Level(path);
+            }
+            catch (Exception ex)
+            {
+                _menu.Message = $"Yüklenemedi: {Path.GetFileName(path)} ({ex.Message})";
+                _menu.IsOpen = true;
+                return;
+            }
+
+            UnloadLevel();
+            level = newLevel;
+            _animator = new TRAnimator(level);
+            _collision = new TRCollision(level);
+
             foreach (var room in level.Rooms)
             {
                 if (room.AlternateRoom >= 0) _alternateRooms.Add(room.AlternateRoom);
@@ -73,14 +127,11 @@ namespace TR2Viewer.Render
             LoadTextures();
             BuildMapGeometry();
             SetupEntities();
-            TRShader.CompileShaders();
 
-            int program = TRShaderHelpers._shaderProgram;
-            _viewLoc = GL.GetUniformLocation(program, "view");
-            _projLoc = GL.GetUniformLocation(program, "projection");
-            _modelLoc = GL.GetUniformLocation(program, "model");
-            _lightLoc = GL.GetUniformLocation(program, "lightScale");
-
+            _freeCamera = false;
+            _orbitYaw = 0f;
+            _orbitPitch = 15f;
+            _animationsPaused = false;
             if (_lara != null)
             {
                 UpdateFollowCamera(0f, snap: true);
@@ -89,12 +140,33 @@ namespace TR2Viewer.Render
             {
                 // Lara'sız bölüm (ör. ara sahneler): serbest kamerayla ilk odadan başla
                 _freeCamera = true;
+                _yaw = -90f;
+                _pitch = 0f;
+                _cameraFront = new Vector3(0f, 0f, -1f);
                 _cameraPosition = new Vector3((level.Rooms[0].Info.X / 1024f) + 3f, (-level.Rooms[0].Info.YTop / 1024f) - 3f, (-level.Rooms[0].Info.Z / 1024f) - 3f);
             }
 
-            Console.WriteLine($"Yüklendi: {level.Rooms.Length} oda, {_vertexCount / 3} üçgen, {_entities.Count} varlık, kamera {_cameraPosition}");
+            _levelLoaded = true;
+            _currentLevelPath = path;
+            _menu.Message = null;
+            _menu.SelectPath(path);
+            Title = $"Tomb Raider 2 - {Path.GetFileNameWithoutExtension(path).ToUpperInvariant()}";
+            Console.WriteLine($"Yüklendi: {Path.GetFileName(path)}: {level.Rooms.Length} oda, {_vertexCount / 3} üçgen, {_entities.Count} varlık");
+        }
 
-            CursorState = CursorState.Grabbed;
+        private void UnloadLevel()
+        {
+            if (!_levelLoaded) return;
+            GL.DeleteBuffer(_vbo);
+            GL.DeleteVertexArray(_vao);
+            GL.DeleteTexture(_textureArray);
+            _vbo = _vao = _textureArray = 0;
+
+            _alternateRooms.Clear();
+            _entities.Clear();
+            _solids.Clear();
+            _lara = null;
+            _levelLoaded = false;
         }
 
         protected override void OnResize(ResizeEventArgs e)
@@ -108,10 +180,34 @@ namespace TR2Viewer.Render
             base.OnRenderFrame(e);
             GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
+            if (_levelLoaded) RenderLevel();
+
+            // Ekran üstü arayüz: yükleme ekranı veya bölüm menüsü
+            if (_pendingLoad != null || _menu.IsOpen)
+            {
+                _ui.Begin(Size);
+                if (_pendingLoad != null)
+                {
+                    var item = _menu.Items.Find(i => i.Path == _pendingLoad);
+                    TRLevelMenu.DrawLoading(_ui, Size, item?.Title ?? Path.GetFileName(_pendingLoad));
+                    _loadingShown = true;
+                }
+                else
+                {
+                    _menu.Draw(_ui, Size, _currentLevelPath, canClose: _levelLoaded);
+                }
+                _ui.End();
+            }
+
+            SwapBuffers();
+        }
+
+        private void RenderLevel()
+        {
             GL.UseProgram(TRShaderHelpers._shaderProgram);
 
             var view = Matrix4.LookAt(_cameraPosition, _cameraPosition + _cameraFront, _cameraUp);
-            var projection = Matrix4.CreatePerspectiveFieldOfView(MathHelper.DegreesToRadians(60f), Size.X / (float)Size.Y, 0.1f, 1000.0f);
+            var projection = Matrix4.CreatePerspectiveFieldOfView(MathHelper.DegreesToRadians(60f), Size.X / (float)Size.Y, NearPlane, 1000.0f);
 
             GL.UniformMatrix4(_viewLoc, false, ref view);
             GL.UniformMatrix4(_projLoc, false, ref projection);
@@ -143,17 +239,13 @@ namespace TR2Viewer.Render
                     GL.DrawArrays(PrimitiveType.Triangles, first, count);
                 }
             }
-
-
-            SwapBuffers();
         }
 
         protected override void OnUnload()
         {
             // OpenGL kaynaklarını serbest bırak
-            GL.DeleteBuffer(_vbo);
-            GL.DeleteVertexArray(_vao);
-            GL.DeleteTexture(_textureArray);
+            UnloadLevel();
+            _ui.Dispose();
             GL.DeleteProgram(TRShaderHelpers._shaderProgram);
             base.OnUnload();
         }
@@ -164,7 +256,41 @@ namespace TR2Viewer.Render
             var input = KeyboardState;
             float dt = (float)e.Time;
 
-            if (input.IsKeyDown(Keys.Escape)) Close();
+            // Menüden seçilen bölüm: önce "Yükleniyor" ekranı bir kez çizilsin, sonra yükle (yükleme birkaç saniye sürebilir)
+            if (_pendingLoad != null)
+            {
+                if (_loadingShown)
+                {
+                    string path = _pendingLoad;
+                    _pendingLoad = null;
+                    _loadingShown = false;
+                    LoadLevel(path);
+                    if (_levelLoaded && _currentLevelPath == path) _menu.IsOpen = false;
+                }
+                return;
+            }
+
+            // Bölüm menüsü açıkken oyun durur
+            if (_menu.IsOpen)
+            {
+                switch (_menu.HandleInput(input, canClose: _levelLoaded, out string? selected))
+                {
+                    case MenuAction.Close: _menu.IsOpen = false; break;
+                    case MenuAction.Quit: Close(); break;
+                    case MenuAction.Load: _pendingLoad = selected; _loadingShown = false; break;
+                }
+                _firstMouse = true; // Menü kapanınca kamera fareyle sıçramasın
+                return;
+            }
+
+            // Esc: bölüm menüsünü aç
+            if (input.IsKeyPressed(Keys.Escape))
+            {
+                _menu.IsOpen = true;
+                _menu.SelectPath(_currentLevelPath);
+                return;
+            }
+            if (!_levelLoaded) return;
 
             // N: Lara'yı takip eden kamera ile serbest uçuş kamerası arasında geçiş
             bool isNPressed = input.IsKeyDown(Keys.N);
@@ -272,28 +398,92 @@ namespace TR2Viewer.Render
             var lara = _lara!;
             Vector3 target = lara.RenderPositionGL + new Vector3(0f, CameraTargetHeight, 0f);
 
-            // TR açısı 0 = OpenGL'de -Z yönü; Lara'nın ileri yönü (sin, 0, -cos), kamera bunun tersinde durur
+            int targetRoom = _collision.ResolveVertical(lara.Room, target.X, target.Y, target.Z);
             float yaw = lara.RenderAngle + MathHelper.DegreesToRadians(_orbitYaw);
             float pitch = MathHelper.DegreesToRadians(_orbitPitch);
+            float distance = CastCamera(target, targetRoom, yaw, pitch, out Vector3 safe, out int safeRoom);
+
+            // İstenen yönde yer yoksa (ör. kamera duvara doğru çevrilmiş, dar sokak) oyundaki gibi başka bir açı dene:
+            // Lara'nın arkası, çaprazlar, yanlar; her biri normal ve daha yukarıdan. En uzağa gidebilen seçilir.
+            if (distance < CameraDistance * 0.6f)
+            {
+                ReadOnlySpan<float> yawOffsets = [0f, 45f, -45f, 90f, -90f, 135f, -135f, 180f];
+                ReadOnlySpan<float> pitches = [_orbitPitch, 45f, 70f];
+                foreach (float yo in yawOffsets)
+                {
+                    foreach (float pd in pitches)
+                    {
+                        float d = CastCamera(target, targetRoom, lara.RenderAngle + MathHelper.DegreesToRadians(yo),
+                            MathHelper.DegreesToRadians(pd), out Vector3 p, out int r);
+                        if (d > distance + 0.05f)
+                        {
+                            distance = d;
+                            safe = p;
+                            safeRoom = r;
+                        }
+                    }
+                    if (distance >= CameraDistance * 0.9f) break;
+                }
+            }
+
+            if (snap)
+            {
+                _cameraPosition = safe;
+            }
+            else
+            {
+                // Yumuşak geçiş; ara konum duvara fazla yaklaşıyorsa (ör. köşeden kesiyorsa) doğrudan güvenli noktaya geç
+                Vector3 smoothed = Vector3.Lerp(_cameraPosition, safe, 1f - MathF.Exp(-dt * 12f));
+                int smoothedRoom = _collision.ResolvePortals(safeRoom, smoothed.X, smoothed.Z);
+                smoothedRoom = _collision.ResolveVertical(smoothedRoom, smoothed.X, smoothed.Y, smoothed.Z);
+                _cameraPosition = CameraFits(smoothedRoom, smoothed) ? smoothed : safe;
+            }
+
+            Vector3 look = target - _cameraPosition;
+            if (look.LengthSquared > 0.0001f) _cameraFront = Vector3.Normalize(look);
+        }
+
+        // Lara'nın üstündeki hedef noktadan verilen yön (yaw) ve yükseklik açısında (pitch) geriye doğru sık adımlarla ilerler;
+        // duvara çarpınca durur. Kamera ancak her yönde duvar/zemin/tavandan CameraClearance kadar uzak noktalara konabilir,
+        // yoksa görüş alanı duvarın arkasını görür. Ulaşılan güvenli noktanın hedefe uzaklığını döndürür.
+        private float CastCamera(Vector3 target, int room, float yaw, float pitch, out Vector3 safe, out int safeRoom)
+        {
+            // TR açısı 0 = OpenGL'de -Z yönü; Lara'nın ileri yönü (sin, 0, -cos), kamera bunun tersinde durur
             Vector3 back = new(-MathF.Sin(yaw) * MathF.Cos(pitch), MathF.Sin(pitch), MathF.Cos(yaw) * MathF.Cos(pitch));
             Vector3 desired = target + back * CameraDistance;
 
-            int room = lara.Room;
-            Vector3 safe = target;
-            const int steps = 24;
+            safe = target;
+            safeRoom = room;
+            float distance = 0f;
+            const int steps = 48;
             for (int i = 1; i <= steps; i++)
             {
                 Vector3 p = Vector3.Lerp(target, desired, i / (float)steps);
                 room = _collision.ResolvePortals(room, p.X, p.Z);
                 room = _collision.ResolveVertical(room, p.X, p.Y, p.Z);
-                if (!_collision.IsOpen(room, p.X, p.Y, p.Z, 0.1f)) break;
-                safe = p;
+                if (!_collision.IsOpen(room, p.X, p.Y, p.Z, 0.02f)) break; // Duvara çarptı
+                if (CameraFits(room, p))
+                {
+                    safe = p;
+                    safeRoom = room;
+                    distance = CameraDistance * i / steps;
+                }
             }
-
-            _cameraPosition = snap ? safe : Vector3.Lerp(_cameraPosition, safe, 1f - MathF.Exp(-dt * 12f));
-
-            Vector3 look = target - _cameraPosition;
-            if (look.LengthSquared > 0.0001f) _cameraFront = Vector3.Normalize(look);
+            return distance;
+        }
+        // Kamera bu noktaya sığar mı: nokta ve ±CameraClearance kadar yanındaki dört nokta açık alanda,
+        // zemin ve tavandan da en az o kadar uzakta olmalı
+        private bool CameraFits(int room, Vector3 p)
+        {
+            ReadOnlySpan<(float X, float Z)> offsets = [(0f, 0f), (CameraClearance, 0f), (-CameraClearance, 0f), (0f, CameraClearance), (0f, -CameraClearance)];
+            foreach (var (ox, oz) in offsets)
+            {
+                float x = p.X + ox, z = p.Z + oz;
+                int r = _collision.ResolvePortals(room, x, z);
+                r = _collision.ResolveVertical(r, x, p.Y, z);
+                if (!_collision.IsOpen(r, x, p.Y, z, CameraClearance)) return false;
+            }
+            return true;
         }
 
         private void LoadTextures()
@@ -484,14 +674,21 @@ namespace TR2Viewer.Render
                     // Lara'nın model varsayılanı 0 = koşma animasyonudur; oyun onu 11 = "dur" ile başlatır.
                     // Animasyonunu ve konumunu bundan sonra kontrolcü yönetir.
                     _animator.Start(animated, TRLaraController.StandAnimation);
-                    _lara = new TRLaraController(level, _animator, _collision, animated, entity);
+                    _lara = new TRLaraController(level, _animator, _collision, animated, entity, _solids);
                 }
                 else
                 {
                     _animator.Start(animated);
                 }
                 _entities.Add(animated);
+
+                // Katı varlık: ilk animasyon karesinin sınır kutusu çarpışma kutusu olur
+                int framePtr = (int)(model.FrameOffset / 2);
+                if (SolidEntityTypes.Contains(entity.TypeID) && framePtr + 6 <= level.Frames.Length)
+                    _solids.Add(new TRSolidBox(entity.X, entity.Y, entity.Z, entityAngle, level.Frames, framePtr, isBoat: entity.TypeID == 14));
             }
+
+            _lara?.SnapOntoObjects();
         }
 
         private static void AddVertex(List<float> list, TR2Room room, int vIndex, float u, float v, int page)

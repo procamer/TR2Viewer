@@ -102,6 +102,22 @@ namespace TR2Viewer.Render
             return true;
         }
 
+        // Sektörün (x, z) noktasındaki tavan yüksekliği (TR birimi, aşağı pozitif). Eğimli tavanlarda FloorData'daki
+        // tavan eğimi kaydı (fonksiyon 3) TR motorunun GetCeiling formülüyle uygulanır (oda geometrisiyle doğrulandı).
+        public float CeilingHeightTR(TRRoomSector sector, float glX, float glZ)
+        {
+            float height = (sbyte)sector.Ceiling * 256f;
+            if (!TryGetFloorDataWord(sector.FDIndex, 3, out ushort slope)) return height;
+
+            int xoff = (sbyte)(slope >> 8);
+            int yoff = (sbyte)(slope & 0xFF);
+            int x = (int)MathF.Floor(glX * 1024f) & 1023; // Sektör içindeki konum (0-1023)
+            int z = (int)MathF.Floor(-glZ * 1024f) & 1023;
+
+            height += xoff < 0 ? (xoff * z) / 4f : -(xoff * (1023 - z)) / 4f;
+            height += yoff < 0 ? (yoff * (1023 - x)) / 4f : -(yoff * x) / 4f;
+            return height;
+        }
         // Sektörün (x, z) noktasındaki zemin yüksekliği (TR birimi, aşağı pozitif).
         // Eğimli sektörlerde FloorData'daki eğim kaydı (fonksiyon 2) TR motorunun GetHeight formülüyle uygulanır:
         // üst byte Z yönündeki, alt byte X yönündeki eğimdir (sektör boyunca "click" cinsinden).
@@ -132,7 +148,7 @@ namespace TR2Viewer.Render
                     continue;
                 }
                 if (IsSolid(sector)) return 9999f;
-                return ClickToGL(sector.Ceiling);
+                return -CeilingHeightTR(sector, glX, glZ) / 1024f;
             }
             return 9999f;
         }

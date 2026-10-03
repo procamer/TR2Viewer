@@ -19,7 +19,8 @@ namespace TR2Viewer.Render
                           StateTurnRight = 6, StateTurnLeft = 7, StateFastFall = 9, StateCompress = 15,
                           StateBack = 16, StateBackJump = 25, StateRightJump = 26, StateLeftJump = 27, StateUpJump = 28,
                           StateHang = 10, StateReach = 11, StatePullUp = 19, StateHangLeft = 30, StateHangRight = 31,
-                          StateSlide = 24, StateFallBack = 29, StateSlideBack = 32;
+                          StateSlide = 24, StateFallBack = 29, StateSlideBack = 32,
+                          StateStepRight = 21, StateStepLeft = 22;
 
         public const int StandAnimation = 11; // Oyun Lara'yı "dur" animasyonuyla başlatır
         private const int FallAnimation = 34; // Kenardan düşerken oyunun (kodda sabit) kullandığı animasyon
@@ -39,6 +40,7 @@ namespace TR2Viewer.Render
         private const float FastTurn = 6f * MathF.PI / 180f;  // Tik başına dönüş (koşarken)
         private const float JumpTurn = 1f * MathF.PI / 180f;  // Havada hafif yön düzeltme
         private const float Radius = 100f;     // Lara'nın duvarlara yaklaşabileceği mesafe (TR birimi)
+        private const float SideRadius = 90f;  // Yan taraftaki duvarlara en yakın mesafe
         private const float Height = 762f;     // Lara'nın boyu (tavan çarpması için)
         private const float StepUp = 256f + 64f; // En fazla 1 click (256) yükseğe adım atabilir
         private const float StepDown = 384f;   // Bundan derin düşüşlerde yere yapışmak yerine düşer
@@ -73,12 +75,17 @@ namespace TR2Viewer.Render
         private LaraInput _input;    // Bu tikin tuşları
         private float _slideAngle = float.NaN; // Kayılan yokuş aşağı yön (yön değişirse kayma yeniden başlar)
 
-        public TRLaraController(TR2Level level, TRAnimator animator, TRCollision collision, TRAnimatedEntity entity, TR2Entity source)
+        private readonly IReadOnlyList<TRSolidBox> _solids; // Üstünde durulabilen varlıklar (ör. tekne)
+
+        public TRLaraController(TR2Level level, TRAnimator animator, TRCollision collision, TRAnimatedEntity entity, TR2Entity source,
+                                IReadOnlyList<TRSolidBox> solids)
         {
             _level = level;
+            _solids = solids;
             _animator = animator;
             _collision = collision;
             Entity = entity;
+            InitBoat();
 
             Position = new Vector3(source.X, source.Y, source.Z);
             Angle = source.Angle / 32768f * MathF.PI;
@@ -119,6 +126,12 @@ namespace TR2Viewer.Render
         private void Tick(LaraInput input)
         {
             _input = input;
+            if (_boatCooldown > 0) _boatCooldown--;
+            if (_inBoat)
+            {
+                TickBoat(input); // Teknede oturma: TRLaraController.Boat.cs
+                return;
+            }
             if (_water != WaterMode.Above)
             {
                 TickWater(input); // Yüzme: TRLaraController.Swim.cs
@@ -256,6 +269,8 @@ namespace TR2Viewer.Render
                     if (input.Jump) return StateCompress;
                     if (input.Forward && !IsBlockedAhead()) return input.Walk ? StateWalk : StateRun;
                     if (input.Back) return input.Walk ? StateBack : StateFastBack;
+                    if (input.Walk && turnDir < 0) return StateStepLeft;   // Shift + sol/sağ: yana adım
+                    if (input.Walk && turnDir > 0) return StateStepRight;
                     if (turnDir < 0) return StateTurnLeft;
                     if (turnDir > 0) return StateTurnRight;
                     return StateStop;
@@ -276,6 +291,12 @@ namespace TR2Viewer.Render
                 case StateFastBack:
                     turn = turnDir * SlowTurn;
                     return StateStop;
+
+                case StateStepLeft:
+                    return input.Walk && input.Left ? StateStepLeft : StateStop;
+
+                case StateStepRight:
+                    return input.Walk && input.Right ? StateStepRight : StateStop;
 
                 case StateSlide:
                     // Kayarken zıplanabilir; eğim bitince durulur
@@ -305,8 +326,8 @@ namespace TR2Viewer.Render
         private static float MoveAngleOffset(int state) => state switch
         {
             StateFastBack or StateBack or StateBackJump or StateSlideBack or StateFallBack => MathF.PI,
-            StateRightJump or StateHangRight => MathF.PI / 2f,
-            StateLeftJump or StateHangLeft => -MathF.PI / 2f,
+            StateRightJump or StateHangRight or StateStepRight => MathF.PI / 2f,
+            StateLeftJump or StateHangLeft or StateStepLeft => -MathF.PI / 2f,
             _ => 0f
         };
 
@@ -394,7 +415,12 @@ namespace TR2Viewer.Render
 
             float len = MathF.Sqrt(dx * dx + dz * dz);
             if (len < 0.001f) return true;
-            return IsFree(x + dx / len * Radius, z + dz / len * Radius);
+            float nx = dx / len, nz = dz / len;
+            if (!IsFree(x + nx * Radius, z + nz * Radius)) return false;
+
+            // Yanlardan da duvara SideRadius'tan fazla yaklaşma (duvar boyunca kayarken gövde duvara girmesin).
+            // Radius'tan biraz küçük: tutunma/tırmanmada Lara duvara tam Radius mesafesine yerleştirilir.
+            return IsFree(x - nz * SideRadius, z + nx * SideRadius) && IsFree(x + nz * SideRadius, z - nx * SideRadius);
         }
 
         private bool IsFree(float x, float z)
@@ -408,15 +434,24 @@ namespace TR2Viewer.Render
 
             // Yerde 1 click'lik basamak çıkılabilir; havada ayakların üstündeki zemin duvar sayılır
             float floorY = -floorGL * 1024f;              // TR Y'si (aşağı pozitif)
-            return floorY >= Position.Y - (_inAir ? 0f : StepUp);
+            floorY = MathF.Min(floorY, ObjectFloor(x, z, out bool objectWall));
+            if (objectWall) return false;
+            if (floorY < Position.Y - (_inAir ? 0f : StepUp)) return false;
+
+            // Tavan Lara'nın başının üstünde kalmalı: eğimli tavanla eğimli zeminin birleştiği mağara duvarları
+            // ancak böyle engellenir (yerde varacağı zemine göre, havada şu anki yüksekliğine göre)
+            float ceilingY = -_collision.GetCeilingHeight(room, glX, glZ) * 1024f;
+            float feetY = _inAir ? Position.Y : floorY;
+            return ceilingY <= feetY - Height;
         }
 
         // (x, z) noktasındaki zemin yüksekliği (TR Y); duvar veya oda dışıysa false
-        private bool TryFloorAt(float x, float z, out float floorY, out int room)
+        // fromRoom: aramanın başlayacağı oda (verilmezse Lara'nın odası)
+        private bool TryFloorAt(float x, float z, out float floorY, out int room, int? fromRoom = null)
         {
             floorY = 0f;
             float glX = x / 1024f, glZ = -z / 1024f;
-            room = _collision.ResolvePortals(Room, glX, glZ);
+            room = _collision.ResolvePortals(fromRoom ?? Room, glX, glZ);
             if (_collision.IsWall(room, glX, glZ)) return false;
 
             float floorGL = _collision.GetFloorHeight(room, glX, glZ);
@@ -580,6 +615,41 @@ namespace TR2Viewer.Render
             return a;
         }
 
+        // (x, z) noktasındaki cisimlerin (varlık kutularının) üst yüzeyi. Kutunun üstüne yerde basamak boyuyla,
+        // havada ayaklar üstündeyken çıkılabilir; çıkılamayan kutu Lara'nın gövdesine denk geliyorsa duvardır.
+        private float ObjectFloor(float x, float z, out bool wall)
+        {
+            wall = false;
+            float floor = float.MaxValue;
+            float reach = _inAir ? 0f : StepUp;
+            foreach (var box in _solids)
+            {
+                if (!box.Contains(x, z)) continue;
+                if (box.TopY >= Position.Y - reach) floor = MathF.Min(floor, box.TopY);
+                else if (box.BottomY > Position.Y - Height) wall = true;
+            }
+            return floor;
+        }
+
+        // Bölüm başında Lara bir cismin içinde başlıyorsa: tekneyse otur, değilse üstüne yerleştir
+        public void SnapOntoObjects()
+        {
+            if (TryEnterBoat(Position.X, Position.Z))
+            {
+                _prevPosition = Position;
+                _prevAngle = Angle;
+                UpdateRender(0f);
+                return;
+            }
+            foreach (var box in _solids)
+            {
+                if (box.Contains(Position.X, Position.Z) && Position.Y > box.TopY && Position.Y <= box.BottomY + 64f)
+                    Position.Y = box.TopY;
+            }
+            _prevPosition = Position;
+            UpdateRender(0f);
+        }
+
         private bool IsBlockedAhead()
         {
             float x = Position.X + MathF.Sin(Angle) * (Radius + 64f);
@@ -592,7 +662,7 @@ namespace TR2Viewer.Render
             float glX = Position.X / 1024f, glZ = -Position.Z / 1024f;
             float floorGL = _collision.GetFloorHeight(Room, glX, glZ);
             if (floorGL == -9999f) return;
-            float floorY = -floorGL * 1024f;
+            float floorY = MathF.Min(-floorGL * 1024f, ObjectFloor(Position.X, Position.Z, out _));
 
             if (!_inAir && floorY > Position.Y + StepDown)
             {
@@ -638,6 +708,7 @@ namespace TR2Viewer.Render
                     _landed = true;
                     _fallSpeed = 0f;
                     _airSpeed = 0f;
+                    if (TryEnterBoat(Position.X, Position.Z)) return; // Teknenin üstüne düştü: otur
                 }
             }
             else

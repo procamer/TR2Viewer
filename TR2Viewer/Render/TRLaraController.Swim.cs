@@ -19,6 +19,7 @@ namespace TR2Viewer.Render
         private const int SurfTreadAnimation = 110;  // Su yüzünde bekleme
         private const int SurfDiveAnimation = 119;   // Su yüzünden dalma
         private const int WaterOutAnimation = 111;   // Sudan kenara çıkma
+        private const int UnderwaterTreadAnimation = 108; // Su altında bekleme
 
         private const float SwimMaxSpeed = 200f;     // Su altı en yüksek hız (kulaç başına +8)
         private const float WaterFriction = 6f;      // Süzülürken tik başına yavaşlama
@@ -28,6 +29,7 @@ namespace TR2Viewer.Render
         private const float PitchStep = 2f * MathF.PI / 180f; // Tik başına eğilme
         private const float MaxPitch = 85f * MathF.PI / 180f;
         private const float WadeDepth = 730f;        // Bundan derin suya yürüyerek girilince yüzmeye geçilir
+        private const float ShallowDepth = 700f;     // Su yüzünde bundan sığ yere gelince ayağa kalkılır (WadeDepth ile arada pay)
         private const int DiveTicks = 10;            // Su yüzünde zıplama tuşu bu kadar tik basılı tutulursa dalınır
 
         private WaterMode _water = WaterMode.Above;
@@ -60,7 +62,12 @@ namespace TR2Viewer.Render
             if (floorY - surfaceY < WadeDepth) return;
 
             StartSurface(surfaceY);
+            SetAnimation(SurfTreadAnimation, _level.Animations[SurfTreadAnimation].FrameStart);
         }
+
+        private static bool IsWaterState(int state) =>
+            state is StateTread or StateSwim or StateGlide or StateSurfTread or StateSurfSwim or StateDive
+                or StateSurfBack or StateSurfLeft or StateSurfRight or StateWaterOut;
 
         private void StartSurface(float surfaceY)
         {
@@ -75,6 +82,13 @@ namespace TR2Viewer.Render
 
         private void TickWater(LaraInput input)
         {
+            // Güvence: suda yüzme dışı bir animasyonda kalınmasın (o animasyonlardan yüzme durumlarına geçiş yoktur)
+            if (!IsWaterState(CurrentAnim.StateID))
+            {
+                int fix = _water == WaterMode.Under ? UnderwaterTreadAnimation : SurfTreadAnimation;
+                SetAnimation(fix, _level.Animations[fix].FrameStart);
+            }
+
             var anim = CurrentAnim;
             int state = anim.StateID;
             int goal = _water == WaterMode.Under ? ChooseUnderwaterGoal(state, input) : ChooseSurfaceGoal(state, input);
@@ -159,7 +173,8 @@ namespace TR2Viewer.Render
             int room = _collision.ResolvePortals(Room, glX, glZ);
             if (_collision.IsWall(room, glX, glZ)) return false;
             float floorY = -_collision.GetFloorHeight(room, glX, glZ) * 1024f;
-            return floorY > Position.Y; // Zemin Lara'nın üstüne çıkıyorsa duvar gibidir
+            float ceilingY = -_collision.GetCeilingHeight(room, glX, glZ) * 1024f;
+            return floorY > Position.Y && ceilingY < Position.Y; // Zemin veya tavan Lara'nın hizasına geliyorsa duvar gibidir
         }
 
         private void LeaveWater()
@@ -233,6 +248,9 @@ namespace TR2Viewer.Render
             float dx = MathF.Sin(angle) * speed, dz = MathF.Cos(angle) * speed;
             if (dx == 0f && dz == 0f) return;
 
+            // Sığ suya gelindiyse ayağa kalk
+            if (TryStandUpInShallowWater(Position.X + dx, Position.Z + dz)) return;
+
             if (CanSurfaceSwimTo(Position.X + dx, Position.Z + dz, dx, dz)) { Position.X += dx; Position.Z += dz; }
             else if (CanSurfaceSwimTo(Position.X + dx, Position.Z, dx, 0f)) Position.X += dx;
             else if (CanSurfaceSwimTo(Position.X, Position.Z + dz, 0f, dz)) Position.Z += dz;
@@ -261,6 +279,35 @@ namespace TR2Viewer.Render
             return floorY > _surfaceY + 128f && ceilingY < _surfaceY - 256f;
         }
 
+        // Su yüzeyinin hemen üstündeki (hava) oda. Havuz kenarları çoğu zaman bu odaya aittir;
+        // su odasında aynı sektör duvar olarak işaretlidir.
+        private int RoomAboveSurface()
+        {
+            float glX = Position.X / 1024f, glZ = -Position.Z / 1024f;
+            return _collision.ResolveVertical(Room, glX, -(_surfaceY - 128f) / 1024f, glZ);
+        }
+
+        // Zemin su yüzeyine yeterince yakınsa (sığ su veya kıyı) Lara ayağa kalkar ve yürümeye devam eder.
+        // Yüzeyin bir basamaktan fazla üstündeki kenarlar için Ctrl ile çıkılır.
+        private bool TryStandUpInShallowWater(float x, float z)
+        {
+            if (!TryFloorAt(x, z, out float floorY, out int room, RoomAboveSurface())) return false;
+            if (floorY - _surfaceY >= ShallowDepth) return false; // Hâlâ derin
+            if (floorY < _surfaceY - StepUp) return false;        // Kıyı çok yüksek: Ctrl ile çıkılır
+            if (_collision.TryGetFloorSlope(room, x / 1024f, -z / 1024f, out int sz, out int sx) && (Math.Abs(sz) > 2 || Math.Abs(sx) > 2))
+                return false;                                      // Dik eğimde ayağa kalkılmaz (geri kayardı)
+
+            Position.X = x;
+            Position.Z = z;
+            Position.Y = floorY;
+            Room = _collision.ResolveVertical(room, x / 1024f, -floorY / 1024f, -z / 1024f);
+            _water = WaterMode.Above;
+            _pitch = 0f;
+            _swimSpeed = 0f;
+            SetAnimation(StandAnimation, _level.Animations[StandAnimation].FrameStart);
+            return true;
+        }
+
         private void Dive()
         {
             _water = WaterMode.Under;
@@ -280,8 +327,8 @@ namespace TR2Viewer.Render
 
             float fx = Position.X + MathF.Sin(snapped) * (Radius + 64f);
             float fz = Position.Z + MathF.Cos(snapped) * (Radius + 64f);
-            if (!TryFloorAt(fx, fz, out float frontY, out int frontRoom)) return false;
-            if (IsWaterRoom(frontRoom)) return false;
+            // Kenarı yüzeyin üstündeki odadan sorgula (su odasında kenar sektörü duvar görünür)
+            if (!TryFloorAt(fx, fz, out float frontY, out int frontRoom, RoomAboveSurface())) return false;
 
             float hdif = frontY - Position.Y; // Negatif = kenar daha yüksek
             if (hdif <= -512f || hdif > 316f) return false;
