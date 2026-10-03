@@ -1,4 +1,4 @@
-﻿using OpenTK.Graphics.OpenGL4;
+using OpenTK.Graphics.OpenGL4;
 using OpenTK.Mathematics;
 using OpenTK.Windowing.Common;
 using OpenTK.Windowing.Desktop;
@@ -14,6 +14,7 @@ namespace TR2Viewer.Render
         private int _vbo;
         private int _vertexCount;
         private int _textureArray;
+        private int _colorPage;            // Renkli yüzler için Palette16'dan üretilen ek doku katmanı
 
         private Vector3 _cameraPosition;
         private Vector3 _cameraFront = new(0.0f, 0.0f, -1.0f);
@@ -26,6 +27,11 @@ namespace TR2Viewer.Render
 
         private int _currentRoom = 0;
         private float _velocityY = 0f;
+        private const float EyeHeight = 700f / 1024f; // Lara'nın göz hizası (TR birimi 700)
+
+        // Flipmap: bölümde bir olay olunca normal odanın yerini alan "alternatif" odalar.
+        // Varsayılan durumda çizilmezler, yoksa normal odayla üst üste biner.
+        private readonly HashSet<int> _alternateRooms = [];
         private bool _noclip = true;
         private bool _nKeyPressed = false;
 
@@ -39,6 +45,11 @@ namespace TR2Viewer.Render
             GL.Enable(EnableCap.Multisample);
             GL.Enable(EnableCap.SampleAlphaToCoverage);
 
+            foreach (var room in level.Rooms)
+            {
+                if (room.AlternateRoom >= 0) _alternateRooms.Add(room.AlternateRoom);
+            }
+
             LoadTextures();
             BuildMapGeometry();
             TRShader.CompileShaders();
@@ -50,7 +61,8 @@ namespace TR2Viewer.Render
                 {
                     if (ent.TypeID == 0) // Lara Croft
                     {
-                        _cameraPosition = new Vector3(ent.X / 1024f, -ent.Y / 1024f, -ent.Z / 1024f);
+                        // Entity Y değeri ayak hizasıdır; kamerayı Lara'nın göz hizasına (~700 birim) kaldır
+                        _cameraPosition = new Vector3(ent.X / 1024f, -ent.Y / 1024f + EyeHeight, -ent.Z / 1024f);
                         float angleDeg = (ent.Angle / 32768f) * 180f;
                         _yaw = angleDeg - 90f;
                         _currentRoom = ent.Room;
@@ -64,7 +76,15 @@ namespace TR2Viewer.Render
                 _cameraPosition = new Vector3((level.Rooms[0].Info.X / 1024f) + 3f, (-level.Rooms[0].Info.YTop / 1024f) - 3f, (-level.Rooms[0].Info.Z / 1024f) - 3f);
             }
             
+            Console.WriteLine($"Yüklendi: {level.Rooms.Length} oda, {_vertexCount / 3} üçgen, kamera {_cameraPosition}");
+
             CursorState = CursorState.Grabbed;
+        }
+
+        protected override void OnResize(ResizeEventArgs e)
+        {
+            base.OnResize(e);
+            GL.Viewport(0, 0, e.Width, e.Height);
         }
 
         protected override void OnRenderFrame(FrameEventArgs e)
@@ -83,27 +103,24 @@ namespace TR2Viewer.Render
             int projLoc = GL.GetUniformLocation(TRShaderHelpers._shaderProgram, "projection");
             GL.UniformMatrix4(projLoc, false, ref projection);
 
+            // Doku filtreleri LoadTextures içinde bir kez ayarlanır; her karede tekrar etmeye gerek yok
             GL.BindTexture(TextureTarget.Texture2DArray, _textureArray);
 
-            // 1. Mipmap (Uzaklaştıkça küçülen dokular) oluştur
-            GL.GenerateMipmap(GenerateMipmapTarget.Texture2DArray);
-
-
-
-            // 2. Çizgisel (Linear) filtreleme kullan (Pikselliği giderir)
-            GL.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
-            GL.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
-            //GL.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
-            //GL.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
-
-            // 3. Anisotropic Filtering (Zeminlerin uzakta net kalmasını sağlar)
-            GL.GetFloat((GetPName)0x84FF, out float maxAniso); // GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
-            GL.TexParameter(TextureTarget.Texture2DArray, (TextureParameterName)0x84FE, maxAniso); // GL_TEXTURE_MAX_ANISOTROPY_EXT
-            
             GL.BindVertexArray(_vao);
             GL.DrawArrays(PrimitiveType.Triangles, 0, _vertexCount);
 
+
             SwapBuffers();
+        }
+
+        protected override void OnUnload()
+        {
+            // OpenGL kaynaklarını serbest bırak
+            GL.DeleteBuffer(_vbo);
+            GL.DeleteVertexArray(_vao);
+            GL.DeleteTexture(_textureArray);
+            GL.DeleteProgram(TRShaderHelpers._shaderProgram);
+            base.OnUnload();
         }
 
         protected override void OnUpdateFrame(FrameEventArgs e)
@@ -142,11 +159,23 @@ namespace TR2Viewer.Render
                 }
                 else
                 {
-                    if (!IsWall(_currentRoom, nextPosition.X, _cameraPosition.Z)) _cameraPosition.X = nextPosition.X;
-                    if (!IsWall(_currentRoom, _cameraPosition.X, nextPosition.Z)) _cameraPosition.Z = nextPosition.Z;
+                    // Kapı (portal) sektörüne adım atılırsa önce komşu odaya geç, duvar kontrolünü o odada yap
+                    int roomX = ResolvePortals(_currentRoom, nextPosition.X, _cameraPosition.Z);
+                    if (!IsWall(roomX, nextPosition.X, _cameraPosition.Z))
+                    {
+                        _cameraPosition.X = nextPosition.X;
+                        _currentRoom = roomX;
+                    }
+
+                    int roomZ = ResolvePortals(_currentRoom, _cameraPosition.X, nextPosition.Z);
+                    if (!IsWall(roomZ, _cameraPosition.X, nextPosition.Z))
+                    {
+                        _cameraPosition.Z = nextPosition.Z;
+                        _currentRoom = roomZ;
+                    }
                 }
 
-                UpdateCurrentRoom();
+                if (_noclip) UpdateCurrentRoom();
             }
 
             // Noclip Aç/Kapat (Debounce ile)
@@ -166,13 +195,15 @@ namespace TR2Viewer.Render
                 _velocityY -= 15.0f * (float)e.Time;
                 _cameraPosition.Y += _velocityY * (float)e.Time;
 
+                // Açık zeminden aşağı düştüysek veya açık tavandan yukarı çıktıysak alt/üst odaya geç
+                _currentRoom = ResolveVertical(_currentRoom, _cameraPosition.X, _cameraPosition.Y - EyeHeight, _cameraPosition.Z);
+
                 float floorHeight = GetFloorHeight(_currentRoom, _cameraPosition.X, _cameraPosition.Z);
-                float eyeLevel = 1.0f;
 
                 // 2. Zemine Çarpma Kontrolü
-                if (_cameraPosition.Y < floorHeight + eyeLevel && floorHeight != -9999f)
+                if (_cameraPosition.Y < floorHeight + EyeHeight && floorHeight != -9999f)
                 {
-                    _cameraPosition.Y = floorHeight + eyeLevel;
+                    _cameraPosition.Y = floorHeight + EyeHeight;
 
                     // Eğer yerdeysek ve Space'e basılırsa ZIPLA!
                     if (input.IsKeyDown(Keys.Space))
@@ -215,32 +246,65 @@ namespace TR2Viewer.Render
         {
             _textureArray = GL.GenTexture();
             GL.BindTexture(TextureTarget.Texture2DArray, _textureArray);
-            GL.TexImage3D(TextureTarget.Texture2DArray, 0, PixelInternalFormat.Rgba8, 256, 256, (int)level.NumTextiles, 0, PixelFormat.Rgba, PixelType.UnsignedByte, IntPtr.Zero);
+            // Son katman renk sayfasıdır (renkli yüzler için)
+            _colorPage = (int)level.NumTextiles;
+            GL.TexImage3D(TextureTarget.Texture2DArray, 0, PixelInternalFormat.Rgba8, 256, 256, _colorPage + 1, 0, PixelFormat.Rgba, PixelType.UnsignedByte, IntPtr.Zero);
             for (int i = 0; i < level.NumTextiles; i++)
             {
                 byte[] rgba = new byte[256 * 256 * 4];
                 for (int j = 0; j < 65536; j++)
                 {
                     ushort p = level.Textiles16[i].Tile[j];
-                    rgba[j * 4 + 0] = (byte)(((p & 0x7C00) >> 10) * 8);
-                    rgba[j * 4 + 1] = (byte)(((p & 0x03E0) >> 5) * 8);
-                    rgba[j * 4 + 2] = (byte)((p & 0x001F) * 8);
-                    rgba[j * 4 + 3] = (byte)((p & 0x8000) != 0 || p == 0 ? 255 : 0);
+                    // ARGB1555: 5 bitlik kanalı 8 bite genişlet (31 -> 255), saydamlık sadece A bitinden gelir
+                    rgba[j * 4 + 0] = Expand5(p >> 10);
+                    rgba[j * 4 + 1] = Expand5(p >> 5);
+                    rgba[j * 4 + 2] = Expand5(p);
+                    rgba[j * 4 + 3] = (byte)((p & 0x8000) != 0 ? 255 : 0);
                 }
                 GL.TexSubImage3D(TextureTarget.Texture2DArray, 0, 0, 0, i, 256, 256, 1, PixelFormat.Rgba, PixelType.UnsignedByte, rgba);
             }
+
+            // Renk sayfası: 256 Palette16 rengini 16x16 piksellik hücrelere yerleştir (bkz. PaletteUV)
+            byte[] colors = new byte[256 * 256 * 4];
+            for (int y = 0; y < 256; y++)
+            {
+                for (int x = 0; x < 256; x++)
+                {
+                    var c = level.Palette16[(y / 16) * 16 + (x / 16)];
+                    int o = (y * 256 + x) * 4;
+                    colors[o + 0] = c.R;
+                    colors[o + 1] = c.G;
+                    colors[o + 2] = c.B;
+                    colors[o + 3] = 255;
+                }
+            }
+            GL.TexSubImage3D(TextureTarget.Texture2DArray, 0, 0, 0, _colorPage, 256, 256, 1, PixelFormat.Rgba, PixelType.UnsignedByte, colors);
             GL.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
             GL.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
         }
-        
+
+        private static byte Expand5(int value)
+        {
+            int c = value & 0x1F;
+            return (byte)((c << 3) | (c >> 2));
+        }
+
+        // TR2 ışık değerleri ters ölçeklidir: 0 = en parlak, 0x1FFF (8191) = en karanlık
+        private static float ShadeToLight(int shade)
+        {
+            float light = 1.0f - (shade / 8192f);
+            return Math.Clamp(light, 0.15f, 1.0f); // Minimum %15 her zaman görünür kalsın
+        }
+
         private void BuildMapGeometry()
         {
             List<float> vertices = [];
 
             // 1. ODALAR (Sabit Duvarlar ve Zeminler)
-            foreach (var room in level.Rooms)
+            for (int r = 0; r < level.Rooms.Length; r++)
             {
-                if (room.Vertices == null) continue;
+                var room = level.Rooms[r];
+                if (room.Vertices == null || _alternateRooms.Contains(r)) continue;
                 if (room.Rectangles != null)
                 {
                     foreach (var rect in room.Rectangles)
@@ -283,13 +347,21 @@ namespace TR2Viewer.Render
             {
                 foreach (var entity in level.Entities)
                 {
+                    if (_alternateRooms.Contains(entity.Room)) continue;
+
                     if (modelDict.TryGetValue(entity.TypeID, out TRModel model))
                     {
-                        // 1. Modelin ilk animasyonunu (Varsayılan bekleme duruşu) al
-                        var anim = level.Animations[model.Animation];
+                        // 1. Modelin ilk animasyonunu (Varsayılan bekleme duruşu) al.
+                        // Animasyonu olmayan modellerde Animation 0xFFFF olabilir; o zaman modelin kendi kare ofseti kullanılır.
+                        uint frameOffset = model.Animation < level.Animations.Length
+                            ? level.Animations[model.Animation].FrameOffset
+                            : model.FrameOffset;
 
                         // TR animasyon ofsetleri byte cinsindendir. Bizim 'Frames' dizimiz short (2 byte) olduğu için 2'ye bölüyoruz!
-                        int framePtr = (int)(anim.FrameOffset / 2);
+                        int framePtr = (int)(frameOffset / 2);
+
+                        // Kare verisi en fazla: 9 short başlık + her uzuv için 2 short dönüş. Dizinin dışına taşacaksa modeli atla.
+                        if (framePtr + 9 + model.NumMeshes * 2 > level.Frames.Length) continue;
 
                         // İlk 9 short değeri Bounding Box (6) ve Root Offset (3) içindir. Bounding Box'ı atlıyoruz.
                         framePtr += 6;
@@ -310,40 +382,16 @@ namespace TR2Viewer.Render
                         Stack<Matrix4> matrixStack = new Stack<Matrix4>();
                         uint meshTreeIndex = model.MeshTree / 4;
 
+                        // Intensity1 = -1 ise nesne odanın ortam ışığını kullanır
+                        float light = entity.Intensity1 >= 0
+                            ? ShadeToLight(entity.Intensity1)
+                            : ShadeToLight(level.Rooms[entity.Room].AmbientIntensity);
+
                         // Modelin tüm uzuvlarını dön
                         for (int i = 0; i < model.NumMeshes; i++)
                         {
                             var mesh = level.Meshes[model.StartingMesh + i];
-                            if (mesh == null) continue;
-
-                            float light = 1.0f; // Varsa entity.Intensity1
-
-                            // Dörtgenleri (Quads) çiz
-                            if (mesh.TexturedRectangles != null)
-                            {
-                                foreach (var rect in mesh.TexturedRectangles)
-                                {
-                                    // AddEntityVertex metodunuzdaki 'offsetY' veya 0f parametresini kendi metodunuza göre ayarlayın
-                                    AddEntityVertex(vertices, mesh.Vertices[rect.V1], rect.Texture, 0, currentMatrix, light);
-                                    AddEntityVertex(vertices, mesh.Vertices[rect.V2], rect.Texture, 1, currentMatrix, light);
-                                    AddEntityVertex(vertices, mesh.Vertices[rect.V3], rect.Texture, 2, currentMatrix, light);
-
-                                    AddEntityVertex(vertices, mesh.Vertices[rect.V1], rect.Texture, 0, currentMatrix, light);
-                                    AddEntityVertex(vertices, mesh.Vertices[rect.V3], rect.Texture, 2, currentMatrix, light);
-                                    AddEntityVertex(vertices, mesh.Vertices[rect.V4], rect.Texture, 3, currentMatrix, light);
-                                }
-                            }
-
-                            // Üçgenleri (Triangles) çiz
-                            if (mesh.TexturedTriangles != null)
-                            {
-                                foreach (var tri in mesh.TexturedTriangles)
-                                {
-                                    AddEntityVertex(vertices, mesh.Vertices[tri.V1], tri.Texture, 0, currentMatrix, light);
-                                    AddEntityVertex(vertices, mesh.Vertices[tri.V2], tri.Texture, 1, currentMatrix, light);
-                                    AddEntityVertex(vertices, mesh.Vertices[tri.V3], tri.Texture, 2, currentMatrix, light);
-                                }
-                            }
+                            if (mesh != null) AddMesh(vertices, mesh, currentMatrix, light);
 
                             // 4. Çizim bitti. Sıradaki parçaya geçerken yeni animasyon açısını al ve eklem yerini bük!
                             if (i < model.NumMeshes - 1 && level.MeshTrees != null)
@@ -365,6 +413,7 @@ namespace TR2Viewer.Render
                 }
             }
 
+            // 3. STATİK OBJELER (Heykeller, Meşaleler vb.)
             Dictionary<uint, TRStaticMeshModel> staticModelDict = [];
             if (level.StaticMeshModels != null)
             {
@@ -372,9 +421,10 @@ namespace TR2Viewer.Render
                     staticModelDict[sm.ID] = sm;
             }
 
-            foreach (var room in level.Rooms)
+            for (int r = 0; r < level.Rooms.Length; r++)
             {
-                if (room.StaticMeshes == null) continue;
+                var room = level.Rooms[r];
+                if (room.StaticMeshes == null || _alternateRooms.Contains(r)) continue;
 
                 foreach (var sm in room.StaticMeshes)
                 {
@@ -384,43 +434,12 @@ namespace TR2Viewer.Render
                         var mesh = level.Meshes[model.Mesh];
                         if (mesh == null) continue;
 
-                        // Açıyı hesapla: TR motorunda açı ushort (0-65535) değerindedir.
-                        // Formül: (Açı / 32768) * Pi
+                        // TR motorunda açı ushort (0-65535) değerindedir. Formül: (Açı / 32768) * Pi
+                        // Konum mutlak dünya koordinatıdır; entity'lerle aynı dünya matrisi kullanılır.
                         float angleRad = (sm.Rotation / 32768f) * (float)Math.PI;
-                        float cosA = (float)Math.Cos(angleRad);
-                        float sinA = (float)Math.Sin(angleRad);
+                        Matrix4 worldMatrix = Matrix4.CreateRotationY(-angleRad) * Matrix4.CreateTranslation(sm.X, -sm.Y, -sm.Z);
 
-                        // Objenin dünyadaki net koordinatı (Odanın koordinatları + objenin yerel koordinatı)
-                        float worldX = sm.X;
-                        float worldY = sm.Y;
-                        float worldZ = sm.Z;
-                        float light = 1.0f; // Varsayılan aydınlatma değeri
-
-                        // Objeye ait Dörtgenleri (Quads) listeye ekle
-                        if (mesh.TexturedRectangles != null)
-                        {
-                            foreach (var rect in mesh.TexturedRectangles)
-                            {
-                                AddStaticVertex(vertices, worldX, worldY, worldZ, mesh.Vertices[rect.V1], rect.Texture, 0, cosA, sinA, light);
-                                AddStaticVertex(vertices, worldX, worldY, worldZ, mesh.Vertices[rect.V2], rect.Texture, 1, cosA, sinA, light);
-                                AddStaticVertex(vertices, worldX, worldY, worldZ, mesh.Vertices[rect.V3], rect.Texture, 2, cosA, sinA, light);
-
-                                AddStaticVertex(vertices, worldX, worldY, worldZ, mesh.Vertices[rect.V1], rect.Texture, 0, cosA, sinA, light);
-                                AddStaticVertex(vertices, worldX, worldY, worldZ, mesh.Vertices[rect.V3], rect.Texture, 2, cosA, sinA, light);
-                                AddStaticVertex(vertices, worldX, worldY, worldZ, mesh.Vertices[rect.V4], rect.Texture, 3, cosA, sinA, light);
-                            }
-                        }
-
-                        // Objeye ait Üçgenleri (Triangles) listeye ekle
-                        if (mesh.TexturedTriangles != null)
-                        {
-                            foreach (var tri in mesh.TexturedTriangles)
-                            {
-                                AddStaticVertex(vertices, worldX, worldY, worldZ, mesh.Vertices[tri.V1], tri.Texture, 0, cosA, sinA, light);
-                                AddStaticVertex(vertices, worldX, worldY, worldZ, mesh.Vertices[tri.V2], tri.Texture, 1, cosA, sinA, light);
-                                AddStaticVertex(vertices, worldX, worldY, worldZ, mesh.Vertices[tri.V3], tri.Texture, 2, cosA, sinA, light);
-                            }
-                        }
+                        AddMesh(vertices, mesh, worldMatrix, ShadeToLight(sm.Intensity1));
                     }
                 }
             }
@@ -451,19 +470,8 @@ namespace TR2Viewer.Render
         {
             var vert = room.Vertices[vIndex];
 
-            // 1. Köşenin kendi ışığını hesapla (0 = Parlak, 32767 = Karanlık)
-            float vertexLight = 1.0f - (vert.Attributes / 16384f);
-
-            // 2. Odanın genel ortam ışığını hesapla (TR2 standardına göre)
-            // AmbientIntensity genellikle 0 (Karanlık) ile 8192 (Parlak) arasındadır.
-            float roomAmbient = room.AmbientIntensity / 8192f;
-
-            // 3. İkisini harmanla! (Hangisi daha parlaksa onu al veya topla)
-            float finalLight = vertexLight + roomAmbient;
-
-            // Sınırları koru (Ne çok parlak, ne zifiri karanlık olsun)
-            if (finalLight > 1.0f) finalLight = 1.0f;
-            if (finalLight < 0.15f) finalLight = 0.15f; // Minimum %15 her zaman görünür kalsın
+            // Köşe ışığı oda aydınlatmasını zaten içerir (Attributes ışık değil, bayrak alanıdır)
+            float finalLight = ShadeToLight(vert.Lighting1);
 
             list.Add((room.Info.X + vert.X) / 1024f);
             list.Add(-vert.Y / 1024f);
@@ -474,31 +482,52 @@ namespace TR2Viewer.Render
             list.Add(finalLight); // 7. Parametre olarak ışığı ekledik!
         }
 
-        private void AddStaticVertex(List<float> list, float worldX, float worldY, float worldZ, TRVertex v, ushort texture, int uvIndex, float cosA, float sinA, float light)
+        // Bir modeli (entity uzvu veya statik obje) dünya matrisiyle dönüştürüp listeye ekler
+        private void AddMesh(List<float> list, TRMesh mesh, Matrix4 transform, float light)
         {
-            var objTex = level.ObjectTextures[texture & 0x7FFF];
-            int page = objTex.TileAndFlag & 0x00FF;
+            // Dokulu yüzler: UV ve sayfa ObjectTextures'tan gelir. Dörtgen iki üçgene bölünür: (1,2,3) ve (1,3,4)
+            foreach (var f in mesh.TexturedRectangles)
+            {
+                var t = level.ObjectTextures[f.Texture & 0x7FFF];
+                int page = t.TileAndFlag & 0x00FF;
+                AddMeshVertex(list, mesh.Vertices[f.V1], t.U[0], t.V[0], page, transform, light);
+                AddMeshVertex(list, mesh.Vertices[f.V2], t.U[1], t.V[1], page, transform, light);
+                AddMeshVertex(list, mesh.Vertices[f.V3], t.U[2], t.V[2], page, transform, light);
+                AddMeshVertex(list, mesh.Vertices[f.V1], t.U[0], t.V[0], page, transform, light);
+                AddMeshVertex(list, mesh.Vertices[f.V3], t.U[2], t.V[2], page, transform, light);
+                AddMeshVertex(list, mesh.Vertices[f.V4], t.U[3], t.V[3], page, transform, light);
+            }
+            foreach (var f in mesh.TexturedTriangles)
+            {
+                var t = level.ObjectTextures[f.Texture & 0x7FFF];
+                int page = t.TileAndFlag & 0x00FF;
+                AddMeshVertex(list, mesh.Vertices[f.V1], t.U[0], t.V[0], page, transform, light);
+                AddMeshVertex(list, mesh.Vertices[f.V2], t.U[1], t.V[1], page, transform, light);
+                AddMeshVertex(list, mesh.Vertices[f.V3], t.U[2], t.V[2], page, transform, light);
+            }
 
-            // Statik objeleri Y ekseninde kendi merkezi etrafında döndürme matematiği
-            float rotX = (v.X * cosA) + (v.Z * sinA);
-            float rotZ = -(v.X * sinA) + (v.Z * cosA);
-
-            list.Add((worldX + rotX) / 1024f);
-            list.Add(-(worldY + v.Y) / 1024f); // Y koordinatları OpenTK için genellikle ters çevrilir
-            list.Add(-(worldZ + rotZ) / 1024f);
-
-            list.Add(objTex.U[uvIndex]);
-            list.Add(objTex.V[uvIndex]);
-            list.Add(page);
-
-            list.Add(light);
+            // Renkli yüzler: renk sayfasındaki ilgili hücrenin ortasından tek renk örneklenir
+            foreach (var f in mesh.ColouredRectangles)
+            {
+                var (u, v) = PaletteUV(f.Texture >> 8);
+                AddMeshVertex(list, mesh.Vertices[f.V1], u, v, _colorPage, transform, light);
+                AddMeshVertex(list, mesh.Vertices[f.V2], u, v, _colorPage, transform, light);
+                AddMeshVertex(list, mesh.Vertices[f.V3], u, v, _colorPage, transform, light);
+                AddMeshVertex(list, mesh.Vertices[f.V1], u, v, _colorPage, transform, light);
+                AddMeshVertex(list, mesh.Vertices[f.V3], u, v, _colorPage, transform, light);
+                AddMeshVertex(list, mesh.Vertices[f.V4], u, v, _colorPage, transform, light);
+            }
+            foreach (var f in mesh.ColouredTriangles)
+            {
+                var (u, v) = PaletteUV(f.Texture >> 8);
+                AddMeshVertex(list, mesh.Vertices[f.V1], u, v, _colorPage, transform, light);
+                AddMeshVertex(list, mesh.Vertices[f.V2], u, v, _colorPage, transform, light);
+                AddMeshVertex(list, mesh.Vertices[f.V3], u, v, _colorPage, transform, light);
+            }
         }
-        
-        private void AddEntityVertex(List<float> list, TRVertex v, ushort texture, int uvIndex, Matrix4 transform, float light)
-        {
-            var objTex = level.ObjectTextures[texture & 0x7FFF];
-            int page = objTex.TileAndFlag & 0x00FF;
 
+        private static void AddMeshVertex(List<float> list, TRVertex v, float u, float tv, int page, Matrix4 transform, float light)
+        {
             // TR'nin model koordinatlarını al (Y ve Z ekseni TR'de ters işler)
             Vector4 localPos = new(v.X, -v.Y, -v.Z, 1.0f);
 
@@ -509,13 +538,20 @@ namespace TR2Viewer.Render
             list.Add(worldPos.Y / 1024f);
             list.Add(worldPos.Z / 1024f);
 
-            list.Add(objTex.U[uvIndex]);
-            list.Add(objTex.V[uvIndex]);
+            list.Add(u);
+            list.Add(tv);
             list.Add(page);
 
             list.Add(light);
         }
-        
+
+        // Renk sayfası 16x16 hücreye bölünmüştür; her hücre (16x16 piksel) bir Palette16 rengidir
+        private static (float u, float v) PaletteUV(int index)
+        {
+            index &= 0xFF;
+            return (((index % 16) * 16 + 8) / 256f, ((index / 16) * 16 + 8) / 256f);
+        }
+
         private void UpdateCurrentRoom()
         {
             int trX = (int)(_cameraPosition.X * 1024f);
@@ -524,6 +560,8 @@ namespace TR2Viewer.Render
 
             for (int i = 0; i < level.Rooms.Length; i++)
             {
+                if (_alternateRooms.Contains(i)) continue;
+
                 var room = level.Rooms[i];
                 int minX = room.Info.X;
                 int maxX = room.Info.X + (room.NumXSectors * 1024);
@@ -545,49 +583,125 @@ namespace TR2Viewer.Render
             }
         }
 
-        private float GetFloorHeight(int roomIndex, float glX, float glZ)
+        // Verilen OpenGL konumunun odadaki sektörünü bulur. Oda dışındaysa false döner.
+        private bool TryGetSector(int roomIndex, float glX, float glZ, out TRRoomSector sector)
         {
-            if (roomIndex < 0 || roomIndex >= level.Rooms.Length) return -9999f;
+            sector = default;
+            if (roomIndex < 0 || roomIndex >= level.Rooms.Length) return false;
             var room = level.Rooms[roomIndex];
 
-            int trX = (int)(glX * 1024f);
-            int trZ = (int)(-glZ * 1024f);
-            int secX = (trX - room.Info.X) / 1024;
-            int secZ = (trZ - room.Info.Z) / 1024;
+            // Negatif değerlerde tam sayı bölmesi sıfıra yuvarlar; doğru sektör için aşağı yuvarla
+            int secX = (int)MathF.Floor((glX * 1024f - room.Info.X) / 1024f);
+            int secZ = (int)MathF.Floor((-glZ * 1024f - room.Info.Z) / 1024f);
 
-            if (secX < 0 || secX >= room.NumXSectors || secZ < 0 || secZ >= room.NumZSectors)
-                return -9999f; // Odanın dışına çıktık
+            if (secX < 0 || secX >= room.NumXSectors || secZ < 0 || secZ >= room.NumZSectors) return false;
 
-            var sector = room.Sectors[(secX * room.NumZSectors) + secZ];
+            sector = room.Sectors[(secX * room.NumZSectors) + secZ];
+            return true;
+        }
+
+        // Sektör yüksekliği "click" (256 TR birimi) cinsindendir; OpenGL Y'sine çevir
+        private static float ClickToGL(byte click) => -((sbyte)click * 256f) / 1024f;
+
+        // TR2 kuralı: Floor ve Ceiling eşitse veya Floor -127 ise orası duvardır.
+        private static bool IsSolid(TRRoomSector sector)
+        {
             sbyte floor = (sbyte)sector.Floor;
-            sbyte ceiling = (sbyte)sector.Ceiling;
+            return floor == (sbyte)sector.Ceiling || floor <= -127;
+        }
 
-            if (floor == ceiling || floor <= -127) return -9999f; // Katı Duvar
-
-            return -(floor * 256f) / 1024f;
+        private float GetFloorHeight(int roomIndex, float glX, float glZ)
+        {
+            // Açık zeminli sektörlerde (RoomBelow) asıl zemin alttaki odadadır; zinciri takip et
+            for (int i = 0; i < 16; i++)
+            {
+                if (!TryGetSector(roomIndex, glX, glZ, out var sector)) return -9999f; // Odanın dışına çıktık
+                if (sector.RoomBelow != 255)
+                {
+                    roomIndex = sector.RoomBelow;
+                    continue;
+                }
+                if (IsSolid(sector)) return -9999f; // Katı Duvar
+                return ClickToGL(sector.Floor);
+            }
+            return -9999f;
         }
 
         private bool IsWall(int roomIndex, float glX, float glZ)
         {
-            if (roomIndex < 0 || roomIndex >= level.Rooms.Length) return true;
-            var room = level.Rooms[roomIndex];
-
-            int trX = (int)(glX * 1024f);
-            int trZ = (int)(-glZ * 1024f);
-
-            int secX = (trX - room.Info.X) / 1024;
-            int secZ = (trZ - room.Info.Z) / 1024;
-
             // Oda sınırları dışı duvar sayılır
-            if (secX < 0 || secX >= room.NumXSectors || secZ < 0 || secZ >= room.NumZSectors)
-                return true;
+            if (!TryGetSector(roomIndex, glX, glZ, out var sector)) return true;
+            return IsSolid(sector);
+        }
 
-            var sector = room.Sectors[(secX * room.NumZSectors) + secZ];
-            sbyte floor = (sbyte)sector.Floor;
-            sbyte ceiling = (sbyte)sector.Ceiling;
+        // Kapı sektörleri kaynak odada duvar olarak işaretlidir; geçiş bilgisi FloorData'daki portal kaydındadır.
+        // Konum bir kapı sektörüne düşüyorsa komşu odanın indeksini döndürür.
+        private int ResolvePortals(int roomIndex, float glX, float glZ)
+        {
+            for (int i = 0; i < 8; i++)
+            {
+                if (!TryGetSector(roomIndex, glX, glZ, out var sector)) return roomIndex;
+                int next = GetPortalRoom(sector.FDIndex);
+                if (next < 0 || next == roomIndex || next >= level.Rooms.Length) return roomIndex;
+                roomIndex = next;
+            }
+            return roomIndex;
+        }
 
-            // TR2 kuralı: Floor ve Ceiling eşitse veya Floor -127 ise orası duvardır.
-            return (floor == ceiling || floor <= -127);
+        // Ayaklar zeminin altına indiyse alttaki odaya, tavanın üstüne çıktıysa üstteki odaya geç
+        private int ResolveVertical(int roomIndex, float glX, float feetY, float glZ)
+        {
+            for (int i = 0; i < 16; i++)
+            {
+                if (!TryGetSector(roomIndex, glX, glZ, out var sector)) return roomIndex;
+                if (sector.RoomBelow != 255 && feetY < ClickToGL(sector.Floor)) roomIndex = sector.RoomBelow;
+                else if (sector.RoomAbove != 255 && feetY > ClickToGL(sector.Ceiling)) roomIndex = sector.RoomAbove;
+                else return roomIndex;
+            }
+            return roomIndex;
+        }
+
+        // FloorData kayıt zincirini tarar, portal (fonksiyon 1) varsa hedef odayı döndürür, yoksa -1.
+        // Her kayıt başlığı: bit 0-4 fonksiyon, bit 15 "son kayıt" işareti.
+        private int GetPortalRoom(ushort fdIndex)
+        {
+            var fd = level.FloorData;
+            if (fdIndex == 0 || fd == null) return -1; // 0 = bu sektörün FloorData'sı yok
+
+            int idx = fdIndex;
+            while (idx < fd.Length)
+            {
+                ushort header = fd[idx++];
+                int function = header & 0x1F;
+                bool isLast = (header & 0x8000) != 0;
+
+                switch (function)
+                {
+                    case 1: // Portal: 1 kelime = komşu oda
+                        return idx < fd.Length ? fd[idx] : -1;
+                    case 2: // Zemin eğimi: 1 kelime
+                    case 3: // Tavan eğimi: 1 kelime
+                        idx++;
+                        break;
+                    case 4: // Tetikleyici: 1 ayar kelimesi + bit 15 ile biten eylem listesi
+                        idx++;
+                        while (idx < fd.Length)
+                        {
+                            ushort action = fd[idx++];
+                            if (((action & 0x7C00) >> 10) == 1) // Kamera eylemi ek bir kelime taşır, bitiş bayrağı onda
+                            {
+                                if (idx >= fd.Length || (fd[idx++] & 0x8000) != 0) break;
+                            }
+                            else if ((action & 0x8000) != 0) break;
+                        }
+                        break;
+                    default: // 5 = Öldürücü zemin, 6 = Tırmanılabilir duvar: ek veri yok
+                        break;
+                }
+
+                if (isLast) break;
+            }
+            return -1;
         }
 
         private static Matrix4 GetFrameRotation(short[] frames, ref int offset)
@@ -615,7 +729,9 @@ namespace TR2Viewer.Render
             else if (mode == 2) rotY = (w1 & 0x03FF) * rad;
             else if (mode == 3) rotZ = (w1 & 0x03FF) * rad;
 
-            return Matrix4.CreateRotationX(rotX) * Matrix4.CreateRotationY(-rotY) * Matrix4.CreateRotationZ(-rotZ);
+            // TR motoru dönüşleri Y-X-Z sırasıyla birleştirir (phd_RotYXZ): köşeye önce Z, sonra X, en son Y uygulanır.
+            // OpenTK satır vektörü kullandığı için çarpım sırası Z * X * Y olur.
+            return Matrix4.CreateRotationZ(-rotZ) * Matrix4.CreateRotationX(rotX) * Matrix4.CreateRotationY(-rotY);
         }
     }
 }

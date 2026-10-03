@@ -1,4 +1,4 @@
-﻿using OpenTK.Graphics.OpenGL4;
+using OpenTK.Graphics.OpenGL4;
 
 namespace TR2Viewer.Render
 {
@@ -30,6 +30,8 @@ namespace TR2Viewer.Render
                     LightValue = aLight;
                 }";
 
+            // Not: GLSL kaynağında sadece ASCII karakter kullanılmalı (Türkçe harfler derlemeyi bozar).
+            // Saydamlık sadece alfa bitinden gelir; siyah pikseller dokunun parçasıdır, atılmaz.
             string fShader = @"
                 #version 330 core
                 out vec4 FragColor;
@@ -41,10 +43,7 @@ namespace TR2Viewer.Render
 
                 void main() {
                     vec4 texColor = texture(textureArray, TexCoord);
-                    if(texColor.a < 0.2 || (texColor.r < 0.02 && texColor.g < 0.02 && texColor.b < 0.02)) 
-                    {
-                        discard;
-                    }
+                    if(texColor.a < 0.5) discard;
                     vec3 finalColor = texColor.rgb * LightValue;
                     finalColor = pow(finalColor, vec3(1.0 / 1.2)); 
                     FragColor = vec4(finalColor, texColor.a);
@@ -66,6 +65,19 @@ namespace TR2Viewer.Render
                         _shaderProgram = GL.CreateProgram();
             GL.AttachShader(TRShaderHelpers._shaderProgram, vs); GL.AttachShader(TRShaderHelpers._shaderProgram, fs);
             GL.LinkProgram(TRShaderHelpers._shaderProgram);
+
+            GL.GetProgram(TRShaderHelpers._shaderProgram, GetProgramParameterName.LinkStatus, out int linked);
+            if (linked == 0)
+            {
+                Console.WriteLine("\n[KRİTİK HATA] Shader programı bağlanamadı!");
+                Console.WriteLine(GL.GetProgramInfoLog(TRShaderHelpers._shaderProgram));
+            }
+
+            // Program bağlandıktan sonra ayrı shader nesnelerine gerek kalmaz
+            GL.DetachShader(TRShaderHelpers._shaderProgram, vs);
+            GL.DetachShader(TRShaderHelpers._shaderProgram, fs);
+            GL.DeleteShader(vs);
+            GL.DeleteShader(fs);
         }
 
         private static void CheckShaderError(int shaderId, string shaderName)

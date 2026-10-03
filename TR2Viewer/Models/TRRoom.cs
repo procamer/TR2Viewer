@@ -4,27 +4,27 @@
     {
         public TRRoomInfo Info;
         public uint NumDataWords;
-        public ushort[] Data;
+        public ushort[] Data = [];
 
         //public TRRoomData RoomData; // Geometri verileri (köşeler, yüzler, spriteler)
-        public TRRoomVertex[] Vertices;
-        public TRFace4[] Rectangles;
-        public TRFace3[] Triangles;
-        public TRRoomSprite[] Sprites;
+        public TRRoomVertex[] Vertices = [];
+        public TRFace4[] Rectangles = [];
+        public TRFace3[] Triangles = [];
+        public TRRoomSprite[] Sprites = [];
 
         public ushort NumPortals;
-        public TRRoomPortal[] Portals;
+        public TRRoomPortal[] Portals = [];
 
         public ushort NumZSectors, NumXSectors;
-        public TRRoomSector[] Sectors;
+        public TRRoomSector[] Sectors = [];
 
         public short AmbientIntensity, AmbientIntensity2, LightMode;
 
         public ushort NumLights;
-        public TR2RoomLight[] Lights;
+        public TR2RoomLight[] Lights = [];
 
         public ushort NumStaticMeshes;
-        public TRRoomStaticMesh[] StaticMeshes;
+        public TRRoomStaticMesh[] StaticMeshes = [];
 
         public short AlternateRoom, Flags;
 

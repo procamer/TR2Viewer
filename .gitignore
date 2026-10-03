@@ -361,3 +361,5 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+# Tomb Raider II oyun dosyaları (telifli, depoya eklenmez)
+TR2Viewer/DATA/

@@ -38,9 +38,12 @@
     public class TRMesh
     {
         // Merkezi koordinat, çap, köşeler, normaller, ışıklar, yüzeyler...
-        public TRVertex[] Vertices;
-        public TRFace4[] TexturedRectangles;
-        public TRFace3[] TexturedTriangles;
+        public TRVertex[] Vertices = [];
+        public TRFace4[] TexturedRectangles = [];
+        public TRFace3[] TexturedTriangles = [];
+        // Dokusuz, düz renkli yüzler. Texture alanının üst byte'ı Palette16 indeksidir.
+        public TRFace4[] ColouredRectangles = [];
+        public TRFace3[] ColouredTriangles = [];
     }
 
     public struct TRFloorData

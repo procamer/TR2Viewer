@@ -15,7 +15,7 @@
         public TR2Entity[] Entities { get; private set; }
         public ushort[] MeshData { get; private set; }
         public uint[] MeshPointers { get; private set; }
-        public TRMesh[] Meshes { get; private set; }
+        public TRMesh?[] Meshes { get; private set; } = []; // Çözülemeyen mesh'ler null kalır
         public ushort[] FloorData { get; private set; }
         public TRStaticMeshModel[] StaticMeshModels { get; private set; }
         public TRMeshTreeNode[] MeshTrees { get; private set; }
@@ -28,9 +28,9 @@
 
         public TR2Level(string filePath)
         {
-            if (!File.Exists(filePath)) return;
+            if (!File.Exists(filePath)) throw new FileNotFoundException($"Bölüm dosyası bulunamadı: {Path.GetFullPath(filePath)}", filePath);
 
-            using BinaryReader reader = new(File.Open(filePath, FileMode.Open));
+            using BinaryReader reader = new(File.OpenRead(filePath));
             // 1. Versiyon
             Version = reader.ReadUInt32();
 
@@ -370,7 +370,7 @@
         {
             if (MeshPointers == null || MeshData == null) return;
 
-            Meshes = new TRMesh[MeshPointers.Length];
+            Meshes = new TRMesh?[MeshPointers.Length];
             for (int m = 0; m < MeshPointers.Length; m++)
             {
                 try
@@ -422,6 +422,29 @@
                     for (int i = 0; i < numTexTris; i++)
                     {
                         mesh.TexturedTriangles[i] = new TRFace3
+                        {
+                            V1 = MeshData[ptr++], V2 = MeshData[ptr++], V3 = MeshData[ptr++],
+                            Texture = MeshData[ptr++]
+                        };
+                    }
+
+                    // 6. Renkli Dörtgenler ve Üçgenler (Coloured Rectangles / Triangles)
+                    short numColRects = (short)MeshData[ptr++];
+                    mesh.ColouredRectangles = new TRFace4[numColRects];
+                    for (int i = 0; i < numColRects; i++)
+                    {
+                        mesh.ColouredRectangles[i] = new TRFace4
+                        {
+                            V1 = MeshData[ptr++], V2 = MeshData[ptr++], V3 = MeshData[ptr++], V4 = MeshData[ptr++],
+                            Texture = MeshData[ptr++]
+                        };
+                    }
+
+                    short numColTris = (short)MeshData[ptr++];
+                    mesh.ColouredTriangles = new TRFace3[numColTris];
+                    for (int i = 0; i < numColTris; i++)
+                    {
+                        mesh.ColouredTriangles[i] = new TRFace3
                         {
                             V1 = MeshData[ptr++], V2 = MeshData[ptr++], V3 = MeshData[ptr++],
                             Texture = MeshData[ptr++]
