@@ -35,19 +35,71 @@ namespace TR2Viewer.Render
 
         public float GetFloorHeight(int roomIndex, float glX, float glZ)
         {
-            // Açık zeminli sektörlerde (RoomBelow) asıl zemin alttaki odadadır; zinciri takip et
+            if (!TryGetFloorSector(roomIndex, glX, glZ, out var sector)) return -9999f;
+            return -FloorHeightTR(sector, glX, glZ) / 1024f;
+        }
+
+        // Oda bayraklarının 0. biti: su odası
+        public bool IsWaterRoom(int roomIndex) =>
+            roomIndex >= 0 && roomIndex < level.Rooms.Length && (level.Rooms[roomIndex].Flags & 1) != 0;
+
+        // Noktanın üstündeki su yüzeyi (TR Y). Su sütununun en üst su odasının tavanıdır; üstünde
+        // havalı bir oda yoksa (kapalı su) yüzey yoktur. Hava odasından sorulursa altındaki suya bakılır.
+        public bool TryGetWaterSurface(int roomIndex, float glX, float glZ, out float surfaceY)
+        {
+            surfaceY = 0f;
             for (int i = 0; i < 16; i++)
             {
-                if (!TryGetSector(roomIndex, glX, glZ, out var sector)) return -9999f; // Odanın dışına çıktık
+                if (!TryGetSector(roomIndex, glX, glZ, out var sector)) return false;
+
+                if (!IsWaterRoom(roomIndex))
+                {
+                    // Hava odası: zemini açık ve altı su ise yüzey bu odanın zeminidir
+                    if (sector.RoomBelow == 255 || !IsWaterRoom(sector.RoomBelow)) return false;
+                    surfaceY = (sbyte)sector.Floor * 256f;
+                    return true;
+                }
+
+                if (sector.RoomAbove == 255) return false; // Kapalı su: yüzey yok
+                if (IsWaterRoom(sector.RoomAbove))
+                {
+                    roomIndex = sector.RoomAbove;
+                    continue;
+                }
+                surfaceY = (sbyte)sector.Ceiling * 256f;
+                return true;
+            }
+            return false;
+        }
+
+        // Noktanın asıl zeminini taşıyan sektörü bulur. Açık zeminli sektörlerde (RoomBelow) asıl zemin
+        // alttaki odadadır; zinciri takip eder. Oda dışı veya katı duvarsa false.
+        public bool TryGetFloorSector(int roomIndex, float glX, float glZ, out TRRoomSector sector)
+        {
+            for (int i = 0; i < 16; i++)
+            {
+                if (!TryGetSector(roomIndex, glX, glZ, out sector)) return false; // Odanın dışına çıktık
                 if (sector.RoomBelow != 255)
                 {
                     roomIndex = sector.RoomBelow;
                     continue;
                 }
-                if (IsSolid(sector)) return -9999f; // Katı Duvar
-                return -FloorHeightTR(sector, glX, glZ) / 1024f;
+                return !IsSolid(sector);
             }
-            return -9999f;
+            sector = default;
+            return false;
+        }
+
+        // Zemin eğimi (FloorData fonksiyon 2): sektör boyunca Z ve X yönündeki eğim, "click" cinsinden.
+        // FloorHeightTR formülüne göre yükseklik (aşağı pozitif) Z'de -slopeZ/4, X'te -slopeX/4 oranında değişir.
+        public bool TryGetFloorSlope(int roomIndex, float glX, float glZ, out int slopeZ, out int slopeX)
+        {
+            slopeZ = slopeX = 0;
+            if (!TryGetFloorSector(roomIndex, glX, glZ, out var sector)) return false;
+            if (!TryGetFloorDataWord(sector.FDIndex, 2, out ushort slope)) return false;
+            slopeZ = (sbyte)(slope >> 8);
+            slopeX = (sbyte)(slope & 0xFF);
+            return true;
         }
 
         // Sektörün (x, z) noktasındaki zemin yüksekliği (TR birimi, aşağı pozitif).

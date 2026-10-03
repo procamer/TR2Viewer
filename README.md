@@ -15,14 +15,14 @@ Projenin merkezinde yer alan `TR2Level.cs` sınıfı, standart TR2 spesifikasyon
 * **Animasyon:** İskelet sistemi (Mesh Trees), animasyonlar, kareler (Frames), durum değişiklikleri ve animasyon komutları.
 * **Zemin Verisi (FloorData):** Odalar arası geçişler için portal kayıtları.
 
-Görüntüleyici (`TRViewer.cs`) odaları ve statik objeleri çizer; varlıklar (düşmanlar, kapılar...) `TRAnimator.cs` ile varsayılan animasyonlarını oynatır. Lara `TRLaraController.cs` ile oyundaki gibi yönetilir: tuşlar hedef durumu belirler, animasyon geçişleri oyunun kendi durum makinesi verisinden (StateChanges / AnimDispatches) gelir, hareket ve zıplama hızları animasyon verisinden (hız alanları ve AnimCommands) alınır, zemin eğimleri FloorData'dan hesaplanır ve kamera Lara'yı arkadan takip eder. Anahtar kareler arasında dönüşler küresel (slerp), kök kayması doğrusal ara değerlenir.
+Görüntüleyici (`TRViewer.cs`) odaları ve statik objeleri çizer; varlıklar (düşmanlar, kapılar...) `TRAnimator.cs` ile varsayılan animasyonlarını oynatır. Lara `TRLaraController.cs` ile oyundaki gibi yönetilir: tuşlar hedef durumu belirler, animasyon geçişleri oyunun kendi durum makinesi verisinden (StateChanges / AnimDispatches) gelir, hareket ve zıplama hızları animasyon verisinden (hız alanları ve AnimCommands) alınır, zemin eğimleri FloorData'dan hesaplanır (dik eğimlerde Lara kayar), su odalarında yüzer (`TRLaraController.Swim.cs`) ve kamera Lara'yı arkadan takip eder. Anahtar kareler arasında dönüşler küresel (slerp), kök kayması doğrusal ara değerlenir.
 
 ### Henüz Desteklenmeyenler
 
 * Sprite'lar, kameralar ve ses kaynakları dosyada atlanır (okunmaz).
 * Yapay zekâ verileri (Boxes, Overlaps, Zones) ve hareketli dokular atlanır.
 * Varlıklardan sonraki bölüm (lightmap, sinematik kareler, demo verisi, ses haritası ve örnekleri) okunmaz.
-* Lara yüzemez, tırmanılabilir duvarlara ve maymun barlarına tutunamaz; dik eğimlerde kaymaz; yüksekten düşünce hasar almaz.
+* Lara tırmanılabilir duvarlara ve maymun barlarına tutunamaz; sığ suda yürüme (wade) animasyonu yok; nefes/hasar sistemi yok; su altı renk efekti yok.
 * Diğer varlıkların animasyonları yerinde oynar: hareket (Speed/Accel), animasyon komutları (ses, efekt) ve durum değişiklikleri uygulanmaz.
 * Zemin eğimleri ve tetikleyiciler yorumlanmaz.
 
@@ -66,6 +66,8 @@ window.Run();
 | A / D, ← / → | Lara döner |
 | Space | Zıpla (yerinde: yukarı; W/S/A/D ile birlikte: ileri/geri/yana; koşarken: koşarak zıplama) |
 | Ctrl | Duvar önünde: 2-3 click yükseğe tırman. Zıplarken basılı tut: kenara tutun. Asılıyken: W yukarı çekil, A/D kenar boyunca kay, Ctrl'yi bırak düş |
+| Su altında | W/S burun aşağı/yukarı, A/D dön, Space kulaç at |
+| Su yüzünde | W/S ileri/geri yüz, A/D dön, Shift+A/D yana yüz, Space'i basılı tut: dal, Ctrl: kenardan sudan çık |
 | Fare | Kamerayı Lara'nın etrafında döndürür (serbest kamerada etrafa bakar) |
 | N | Lara'yı takip eden kamera ile serbest uçuş kamerası arasında geçiş |
 | Serbest kamerada WASD / Space / Sol Shift | Uçuş: ileri, geri, yan, yukarı, aşağı |

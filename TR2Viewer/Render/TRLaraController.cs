@@ -12,19 +12,23 @@ namespace TR2Viewer.Render
     // Lara'yı oyundaki gibi yönetir: tuşlar "hedef durum" (goal state) belirler, geçişi oyunun kendi
     // StateChanges/AnimDispatches verisi yapar, hareket hızı ve zıplama hızları animasyon verisinden gelir.
     // Mantık TR motoru gibi saniyede 30 tikte çalışır; çizim için tikler arası ara değer üretilir.
-    public class TRLaraController
+    public partial class TRLaraController
     {
         // TR Lara durum (state) numaraları
         private const int StateWalk = 0, StateRun = 1, StateStop = 2, StateForwardJump = 3, StateFastBack = 5,
                           StateTurnRight = 6, StateTurnLeft = 7, StateFastFall = 9, StateCompress = 15,
                           StateBack = 16, StateBackJump = 25, StateRightJump = 26, StateLeftJump = 27, StateUpJump = 28,
-                          StateHang = 10, StateReach = 11, StatePullUp = 19, StateHangLeft = 30, StateHangRight = 31;
+                          StateHang = 10, StateReach = 11, StatePullUp = 19, StateHangLeft = 30, StateHangRight = 31,
+                          StateSlide = 24, StateFallBack = 29, StateSlideBack = 32;
 
         public const int StandAnimation = 11; // Oyun Lara'yı "dur" animasyonuyla başlatır
         private const int FallAnimation = 34; // Kenardan düşerken oyunun (kodda sabit) kullandığı animasyon
         private const int ClimbTwoAnimation = 50;   // Duruştan 2 click (512) yükseğe tırmanma (kodda sabit)
         private const int ClimbThreeAnimation = 42; // Duruştan 3 click (768) yükseğe tırmanma (kodda sabit)
         private const int DropAnimation = 28;       // Kenarı bırakınca düşüş (yukarı zıplama döngüsü)
+        private const int SlideAnimation = 70;      // Dik eğimde öne kayma (kodda sabit)
+        private const int SlideBackAnimation = 104; // Dik eğimde geriye kayma (kodda sabit)
+        private const int FallBackAnimation = 93;   // Geriye kayarken boşluğa düşme (kodda sabit)
 
         // Animasyon komutları (AnimCommands) ve aldıkları parametre sayısı
         private const int CmdSetPosition = 1, CmdJumpVelocity = 2;
@@ -60,12 +64,14 @@ namespace TR2Viewer.Render
         private float _fallSpeed;    // Dikey hız (negatif = yukarı)
         private float _airSpeed;     // Havadaki yatay hız (zıplama komutundan gelir)
         private float _groundSpeed;  // Son tikteki yerdeki hız (kenardan düşerken korunur)
+        private float _airMoveAngle; // Havadaki hareket yönü: kalkış anında sabitlenir (oyundaki move_angle)
         private bool _landed;            // Bu zıplama/düşmeden yere indi, iniş animasyonu bekleniyor
         private int _groundedInAirState; // İndikten sonra iniş geçişi bulunamazsa sayaç
 
         private bool _hanging;       // Bir kenara asılı (veya yukarı çekiliyor): yerçekimi ve zemin takibi yok
         private float _hangEdgeY;    // Tutunulan kenarın yüksekliği (TR Y)
         private LaraInput _input;    // Bu tikin tuşları
+        private float _slideAngle = float.NaN; // Kayılan yokuş aşağı yön (yön değişirse kayma yeniden başlar)
 
         public TRLaraController(TR2Level level, TRAnimator animator, TRCollision collision, TRAnimatedEntity entity, TR2Entity source)
         {
@@ -95,6 +101,7 @@ namespace TR2Viewer.Render
             {
                 _prevPosition = Position;
                 _prevAngle = Angle;
+                _prevPitch = _pitch;
                 Tick(input);
                 _accumulator -= TickSeconds;
             }
@@ -104,7 +111,7 @@ namespace TR2Viewer.Render
         private TRAnimation CurrentAnim => _level.Animations[Entity.Animation];
 
         private static bool IsAirState(int state) =>
-            state is StateForwardJump or StateFastFall or StateBackJump or StateRightJump or StateLeftJump or StateUpJump or StateReach;
+            state is StateForwardJump or StateFastFall or StateBackJump or StateRightJump or StateLeftJump or StateUpJump or StateReach or StateFallBack;
 
         // Duruştan tırmanma animasyonları: Lara duvarın önünde durur, animasyon sonundaki komut onu kenarın üstüne taşır
         private bool IsClimbing => Entity.Animation is ClimbTwoAnimation or ClimbThreeAnimation;
@@ -112,6 +119,12 @@ namespace TR2Viewer.Render
         private void Tick(LaraInput input)
         {
             _input = input;
+            if (_water != WaterMode.Above)
+            {
+                TickWater(input); // Yüzme: TRLaraController.Swim.cs
+                return;
+            }
+
             var anim = CurrentAnim;
             int state = anim.StateID;
 
@@ -126,17 +139,8 @@ namespace TR2Viewer.Render
                 state = anim.StateID;
             }
 
-            // 2. Animasyonu bir tik ilerlet: önce hedef duruma geçiş, yoksa animasyon sonunda komutlar ve zincir
-            _frame++;
-            if (goal != state && TryGetDispatch(anim, goal, _frame, out int nextAnim, out int nextFrame))
-            {
-                SetAnimation(nextAnim, nextFrame);
-            }
-            else if (_frame > anim.FrameEnd)
-            {
-                RunEndCommands(anim);
-                if (anim.NextAnimation < _level.Animations.Length) SetAnimation(anim.NextAnimation, anim.NextFrame);
-            }
+            // 2. Animasyonu bir tik ilerlet
+            Animate(anim, state, goal);
 
             // İndi ama iniş geçişi bulunamadıysa (veride olmayan bir durum) birkaç tik sonra ayağa kaldır.
             // Sadece gerçek bir inişten sonra sayılır: kalkış animasyonları da "havada" durumundadır ama Lara henüz yerdedir.
@@ -159,7 +163,10 @@ namespace TR2Viewer.Render
             float speed = _inAir ? _airSpeed : (anim.Speed + anim.Accel * (float)(_frame - anim.FrameStart)) / 65536f;
             if (!_inAir) _groundSpeed = speed;
 
-            float moveAngle = Angle + MoveAngleOffset(anim.StateID);
+            // Havada yön kalkışta sabittir; sadece ileri zıplama/uzanmada Lara'nın döndüğü yöne gider
+            float moveAngle = !_inAir || anim.StateID is StateForwardJump or StateReach
+                ? Angle + MoveAngleOffset(anim.StateID)
+                : _airMoveAngle;
             if (_hanging)
             {
                 // Asılıyken sadece kenar boyunca yana kayılır
@@ -171,7 +178,26 @@ namespace TR2Viewer.Render
             }
 
             // 4. Dikey hareket: zemin takibi, zıplama/düşme (asılıyken ve tırmanırken yok)
-            if (!_hanging && !IsClimbing) UpdateVertical();
+            if (!_hanging && !IsClimbing)
+            {
+                UpdateVertical();
+                TestSlide();
+            }
+        }
+
+        // Animasyonu bir tik ilerletir: önce hedef duruma geçiş, yoksa animasyon sonunda komutlar ve zincir
+        private void Animate(TRAnimation anim, int state, int goal)
+        {
+            _frame++;
+            if (goal != state && TryGetDispatch(anim, goal, _frame, out int nextAnim, out int nextFrame))
+            {
+                SetAnimation(nextAnim, nextFrame);
+            }
+            else if (_frame > anim.FrameEnd)
+            {
+                RunEndCommands(anim);
+                if (anim.NextAnimation < _level.Animations.Length) SetAnimation(anim.NextAnimation, anim.NextFrame);
+            }
         }
 
         // Asılıyken hedef durum: Ctrl bırakılırsa düş, ileri = yukarı çekil, sağ/sol = kenar boyunca kay
@@ -251,6 +277,15 @@ namespace TR2Viewer.Render
                     turn = turnDir * SlowTurn;
                     return StateStop;
 
+                case StateSlide:
+                    // Kayarken zıplanabilir; eğim bitince durulur
+                    if (input.Jump) return StateForwardJump;
+                    return TryGetSteepSlope(out _) ? StateSlide : StateStop;
+
+                case StateSlideBack:
+                    if (input.Jump) return StateBackJump;
+                    return TryGetSteepSlope(out _) ? StateSlideBack : StateStop;
+
                 case StateCompress:
                     // Zıplama yönü: tuşa göre; tuş yoksa hazırlık animasyonu yukarı zıplamaya zincirlenir
                     if (input.Forward) return StateForwardJump;
@@ -269,7 +304,7 @@ namespace TR2Viewer.Render
         // Hareket yönü Lara'nın baktığı yöne göre: geri ve yan zıplamalar farklı yöne gider
         private static float MoveAngleOffset(int state) => state switch
         {
-            StateFastBack or StateBack or StateBackJump => MathF.PI,
+            StateFastBack or StateBack or StateBackJump or StateSlideBack or StateFallBack => MathF.PI,
             StateRightJump or StateHangRight => MathF.PI / 2f,
             StateLeftJump or StateHangLeft => -MathF.PI / 2f,
             _ => 0f
@@ -329,6 +364,7 @@ namespace TR2Viewer.Render
                 {
                     _fallSpeed = cmds[p];     // Negatif = yukarı
                     _airSpeed = cmds[p + 1];  // Yatay hız
+                    _airMoveAngle = Angle + MoveAngleOffset(anim.StateID); // Kalkış animasyonunun yönü (geri/yan zıplama)
                     _inAir = true;
                 }
                 p += CommandArgCount[type];
@@ -497,6 +533,53 @@ namespace TR2Viewer.Render
             return true;
         }
 
+        // Lara dik bir eğimde mi (sektör boyunca 2 click'ten fazla)? Öyleyse yokuş aşağı yönü döndürür.
+        // Yön TR motoru gibi eksenlere oturtulur: eğimin baskın olduğu eksen seçilir.
+        private bool TryGetSteepSlope(out float downhill)
+        {
+            downhill = 0f;
+            float glX = Position.X / 1024f, glZ = -Position.Z / 1024f;
+            if (!_collision.TryGetFloorSlope(Room, glX, glZ, out int slopeZ, out int slopeX)) return false;
+            if (Math.Abs(slopeZ) <= 2 && Math.Abs(slopeX) <= 2) return false;
+
+            // Zemin yüksekliği (aşağı pozitif) X'te -slopeX/4, Z'de -slopeZ/4 oranında artar: yokuş aşağı bu yöndür
+            float gx = -slopeX, gz = -slopeZ;
+            if (MathF.Abs(gz) > MathF.Abs(gx)) downhill = gz > 0 ? 0f : MathF.PI;
+            else downhill = gx > 0 ? MathF.PI / 2f : -MathF.PI / 2f;
+            return true;
+        }
+
+        // Dik eğime basıldıysa kaymaya başla: yokuş aşağı bakıyorsa öne, yukarı bakıyorsa geriye kayar
+        private void TestSlide()
+        {
+            int state = CurrentAnim.StateID;
+            if (_inAir || IsAirState(state) || state == StateCompress) return;
+            if (!TryGetSteepSlope(out float downhill)) return;
+
+            float diff = WrapAngle(downhill - Angle);
+            if (MathF.Abs(diff) <= MathF.PI / 2f)
+            {
+                if (state == StateSlide && _slideAngle == downhill) return;
+                Angle += diff; // Yokuş aşağı dön (en kısa yoldan)
+                SetAnimation(SlideAnimation, _level.Animations[SlideAnimation].FrameStart);
+            }
+            else
+            {
+                if (state == StateSlideBack && _slideAngle == downhill) return;
+                Angle += WrapAngle(downhill + MathF.PI - Angle); // Yokuş yukarı bak
+                SetAnimation(SlideBackAnimation, _level.Animations[SlideBackAnimation].FrameStart);
+            }
+            _slideAngle = downhill;
+        }
+
+        private static float WrapAngle(float a)
+        {
+            a %= MathF.Tau;
+            if (a > MathF.PI) a -= MathF.Tau;
+            if (a < -MathF.PI) a += MathF.Tau;
+            return a;
+        }
+
         private bool IsBlockedAhead()
         {
             float x = Position.X + MathF.Sin(Angle) * (Radius + 64f);
@@ -517,7 +600,9 @@ namespace TR2Viewer.Render
                 _inAir = true;
                 _fallSpeed = 0f;
                 _airSpeed = _groundSpeed;
-                if (FallAnimation < _level.Animations.Length) SetAnimation(FallAnimation, _level.Animations[FallAnimation].FrameStart);
+                _airMoveAngle = Angle + MoveAngleOffset(CurrentAnim.StateID); // Düşmeden önceki hareket yönü
+                int fall = CurrentAnim.StateID == StateSlideBack ? FallBackAnimation : FallAnimation;
+                if (fall < _level.Animations.Length) SetAnimation(fall, _level.Animations[fall].FrameStart);
             }
 
             if (_inAir)
@@ -528,6 +613,14 @@ namespace TR2Viewer.Render
 
                 // Ctrl basılıyken uzanma veya yukarı zıplama sırasında aşağı inerken kenara tutun
                 if (_input.Action && _fallSpeed > 0f && CurrentAnim.StateID is (StateReach or StateUpJump) && TryCatchEdge(prevY)) return;
+
+                // Suya düştüyse dal (ayaklar su yüzeyinin altına indi)
+                Room = _collision.ResolveVertical(Room, glX, -Position.Y / 1024f, glZ);
+                if (IsWaterRoom(Room))
+                {
+                    EnterWaterFromAir();
+                    return;
+                }
 
                 // Tavana çarptıysa geri sek
                 float ceilingY = -_collision.GetCeilingHeight(Room, glX, glZ) * 1024f;
@@ -553,17 +646,22 @@ namespace TR2Viewer.Render
             }
 
             Room = _collision.ResolveVertical(Room, glX, -Position.Y / 1024f, glZ);
+
+            // Yürürken derin suya girildiyse su yüzünde yüzmeye geç
+            if (!_inAir && IsWaterRoom(Room)) TryEnterWaterFromGround();
         }
 
         private void UpdateRender(float t)
         {
             Vector3 pos = Vector3.Lerp(_prevPosition, Position, t);
             float angle = _prevAngle + (Angle - _prevAngle) * t;
+            float pitch = _prevPitch + (_pitch - _prevPitch) * t;
 
             RenderPositionGL = new Vector3(pos.X / 1024f, -pos.Y / 1024f, -pos.Z / 1024f);
             RenderAngle = angle;
 
-            Entity.World = Matrix4.CreateRotationY(-angle) * Matrix4.CreateTranslation(pos.X, -pos.Y, -pos.Z);
+            // TR sırası: önce eğilme (X), sonra yön (Y); OpenGL'de Y ve Z ters olduğu için yön açısı eksi
+            Entity.World = Matrix4.CreateRotationX(pitch) * Matrix4.CreateRotationY(-angle) * Matrix4.CreateTranslation(pos.X, -pos.Y, -pos.Z);
             Entity.Frame = _frame + t; // Kareler arası ara değer (animatör anahtar kareler arasında yumuşatır)
             _animator.UpdatePose(Entity);
         }
