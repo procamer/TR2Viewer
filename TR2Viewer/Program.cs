@@ -8,7 +8,7 @@ namespace TR2Viewer
         static void Main(string[] args)
         {
             // Komut satırından bölüm verilebilir: TR2Viewer.exe DATA/WALL.TR2
-            string fileName = args.Length > 0 ? args[0] : "DATA/boat.TR2";
+            string fileName = args.Length > 0 ? args[0] : "DATA/catacomb.TR2";
             string filePath = ResolveLevelPath(fileName);
 
             var level = new TR2Level(filePath);

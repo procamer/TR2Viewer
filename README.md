@@ -15,14 +15,16 @@ Projenin merkezinde yer alan `TR2Level.cs` sınıfı, standart TR2 spesifikasyon
 * **Animasyon:** İskelet sistemi (Mesh Trees), animasyonlar, kareler (Frames), durum değişiklikleri ve animasyon komutları.
 * **Zemin Verisi (FloorData):** Odalar arası geçişler için portal kayıtları.
 
-Görüntüleyici (`TRViewer.cs`) odaları, statik objeleri ve varlıkları ilk animasyon karesindeki duruşlarıyla çizer.
+Görüntüleyici (`TRViewer.cs`) odaları ve statik objeleri çizer; varlıklar (düşmanlar, kapılar...) `TRAnimator.cs` ile varsayılan animasyonlarını oynatır. Lara `TRLaraController.cs` ile oyundaki gibi yönetilir: tuşlar hedef durumu belirler, animasyon geçişleri oyunun kendi durum makinesi verisinden (StateChanges / AnimDispatches) gelir, hareket ve zıplama hızları animasyon verisinden (hız alanları ve AnimCommands) alınır, zemin eğimleri FloorData'dan hesaplanır ve kamera Lara'yı arkadan takip eder. Anahtar kareler arasında dönüşler küresel (slerp), kök kayması doğrusal ara değerlenir.
 
 ### Henüz Desteklenmeyenler
 
 * Sprite'lar, kameralar ve ses kaynakları dosyada atlanır (okunmaz).
 * Yapay zekâ verileri (Boxes, Overlaps, Zones) ve hareketli dokular atlanır.
 * Varlıklardan sonraki bölüm (lightmap, sinematik kareler, demo verisi, ses haritası ve örnekleri) okunmaz.
-* Animasyonlar oynatılmaz; zemin eğimleri ve tetikleyiciler yorumlanmaz.
+* Lara yüzemez, tırmanılabilir duvarlara ve maymun barlarına tutunamaz; dik eğimlerde kaymaz; yüksekten düşünce hasar almaz.
+* Diğer varlıkların animasyonları yerinde oynar: hareket (Speed/Accel), animasyon komutları (ses, efekt) ve durum değişiklikleri uygulanmaz.
+* Zemin eğimleri ve tetikleyiciler yorumlanmaz.
 
 ## 🛠️ Teknolojiler
 
@@ -59,9 +61,14 @@ window.Run();
 
 | Tuş | İşlev |
 |---|---|
-| W / A / S / D | Hareket |
-| Fare | Etrafa bakma |
-| Space / Sol Shift | Yukarı / aşağı (uçuş modu), zıplama (yürüme modu) |
-| N | Uçuş (noclip) ve yürüme (yerçekimi) modu arasında geçiş |
+| W / ↑ | Lara koşar (Shift ile yürür) |
+| S / ↓ | Lara geri sıçrar (Shift ile geri yürür) |
+| A / D, ← / → | Lara döner |
+| Space | Zıpla (yerinde: yukarı; W/S/A/D ile birlikte: ileri/geri/yana; koşarken: koşarak zıplama) |
+| Ctrl | Duvar önünde: 2-3 click yükseğe tırman. Zıplarken basılı tut: kenara tutun. Asılıyken: W yukarı çekil, A/D kenar boyunca kay, Ctrl'yi bırak düş |
+| Fare | Kamerayı Lara'nın etrafında döndürür (serbest kamerada etrafa bakar) |
+| N | Lara'yı takip eden kamera ile serbest uçuş kamerası arasında geçiş |
+| Serbest kamerada WASD / Space / Sol Shift | Uçuş: ileri, geri, yan, yukarı, aşağı |
+| P | Animasyonları durdur / devam ettir |
 | Esc | Çıkış |
 

@@ -22,12 +22,14 @@ namespace TR2Viewer.Render
 
                 uniform mat4 view;
                 uniform mat4 projection;
+                uniform mat4 model;      // Identity for rooms/statics, per-limb matrix for animated meshes
+                uniform float lightScale; // 1.0 for rooms/statics, entity light for animated meshes
 
                 void main()
                 {
-                    gl_Position = projection * view * vec4(aPos, 1.0);
+                    gl_Position = projection * view * model * vec4(aPos, 1.0);
                     TexCoord = aTex;
-                    LightValue = aLight;
+                    LightValue = aLight * lightScale;
                 }";
 
             // Not: GLSL kaynağında sadece ASCII karakter kullanılmalı (Türkçe harfler derlemeyi bozar).
